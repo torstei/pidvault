@@ -7,6 +7,11 @@
   a system-call allow-list); `systemd-analyze security` rates it 0.5 instead of 6.4.
   systemd creates its sockets, and a separate, minimal root unit, `sshvault-mount`, makes
   the mount, hands it over and unmounts when the daemon goes away.
+- Limits on what any process can make the daemon do: passphrase guesses are throttled per
+  user (one at a time, doubling waits after each wrong one), scrypt runs one at a time and
+  never beyond cost 2^20, and connections are capped per user and in total.
+- RSA signatures are blinded; the README recommends ed25519.
+- The agent refuses a connection once the process that opened it has exited.
 
 ## 0.2.0
 

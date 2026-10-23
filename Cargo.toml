@@ -16,7 +16,7 @@ fuser = { version = "0.18.0", default-features = false }
 getrandom = "0.4.3"
 libc = "0.2.191"
 rpassword = "7.5.4"
-rsa = { version = "0.9", default-features = false, features = ["sha2"] }
+rsa = { version = "0.9", default-features = false, features = ["sha2", "getrandom"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10"

@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::fs::{self, Shared};
 use crate::keys::AgentKey;
-use crate::procs::{self, PeerCred};
+use crate::procs::{self, Liveness, PeerCred, Pidfd};
 use crate::secret::SecretBuf;
 
 /// The file in a vault that says which of its keys may be used where.
@@ -63,6 +63,9 @@ pub fn policy_of(tree: &crate::tree::Tree) -> Result<Policy> {
 
 struct Connection {
     peer: PeerCred,
+    /// The process that connected: once it is gone, whoever holds the connection now is
+    /// not the one whose shell was checked.
+    process: Pidfd,
     /// ssh marks a connection it opened on behalf of a remote host; it stays marked.
     forwarded: bool,
 }
@@ -71,8 +74,12 @@ pub fn serve(mut stream: UnixStream, state: &Shared) {
     let Ok(peer) = procs::peer_cred(&stream) else {
         return;
     };
+    let Ok(process) = procs::peer_pidfd(&stream, peer.pid) else {
+        return;
+    };
     let mut connection = Connection {
         peer,
+        process,
         forwarded: false,
     };
     while let Ok(Some(request)) = read_message(&mut stream) {
@@ -87,6 +94,9 @@ pub fn serve(mut stream: UnixStream, state: &Shared) {
 
 impl Connection {
     fn answer(&mut self, request: &[u8], state: &Shared) -> Result<Vec<u8>> {
+        if self.process.has_exited() {
+            bail!("the process that connected is gone");
+        }
         let (&kind, mut body) = request.split_first().context("empty message")?;
         match kind {
             REQUEST_IDENTITIES => {
@@ -216,6 +226,7 @@ fn take_string<'a>(input: &mut &'a [u8]) -> Result<&'a [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
 
     #[test]
     fn policy_lists_forwardable_keys_and_defaults_to_none() {
@@ -232,6 +243,117 @@ mod tests {
     fn unknown_policy_settings_are_errors() {
         assert!(Policy::parse(b"[keys.\"id\"]\nforwrd = true\n").is_err());
         assert!(Policy::parse(b"not toml [").is_err());
+    }
+
+    fn connection(process: Pidfd) -> (Connection, Shared, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let state: Shared = std::sync::Arc::new(std::sync::Mutex::new(fs::State::new(
+            dir.path().to_path_buf(),
+        )));
+        let peer = PeerCred {
+            pid: std::process::id(),
+            uid: crate::users::current_uid(),
+        };
+        (
+            Connection {
+                peer,
+                process,
+                forwarded: false,
+            },
+            state,
+            dir,
+        )
+    }
+
+    fn me() -> Pidfd {
+        Pidfd::open(std::process::id()).unwrap()
+    }
+
+    /// A small deterministic generator, so a failure can be reproduced.
+    fn noise(seed: &mut u64) -> u64 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        *seed
+    }
+
+    #[test]
+    fn random_and_truncated_messages_never_panic_and_get_well_formed_replies() {
+        let (mut connection, state, _dir) = connection(me());
+        let mut seed = 0x5eed_u64;
+        let kinds = [
+            0,
+            FAILURE,
+            SUCCESS,
+            REQUEST_IDENTITIES,
+            SIGN_REQUEST,
+            17,
+            18,
+            19,
+            22,
+            25,
+            EXTENSION,
+            255,
+        ];
+        for _ in 0..5000 {
+            let kind = kinds[(noise(&mut seed) % kinds.len() as u64) as usize];
+            let len = (noise(&mut seed) % 96) as usize;
+            let mut message = vec![kind];
+            for _ in 0..len {
+                // mostly small numbers, so lengths inside the message often look plausible
+                message.push(if noise(&mut seed).is_multiple_of(3) {
+                    (noise(&mut seed) % 8) as u8
+                } else {
+                    noise(&mut seed) as u8
+                });
+            }
+            if let Ok(reply) = connection.answer(&message, &state) {
+                assert!(
+                    [SUCCESS, IDENTITIES_ANSWER, SIGN_RESPONSE].contains(&reply[0]),
+                    "{message:?} -> {reply:?}"
+                );
+            }
+        }
+        let mut bind = vec![EXTENSION];
+        put_string(&mut bind, SESSION_BIND);
+        for cut in 0..bind.len() + 20 {
+            let mut truncated = bind.clone();
+            truncated.resize(cut.min(bind.len()), 0);
+            let _ = connection.answer(&truncated, &state);
+        }
+    }
+
+    #[test]
+    fn an_oversized_message_closes_the_connection() {
+        let (mut ours, theirs) = UnixStream::pair().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state: Shared = std::sync::Arc::new(std::sync::Mutex::new(fs::State::new(
+            dir.path().to_path_buf(),
+        )));
+        let server = std::thread::spawn(move || serve(theirs, &state));
+        ours.write_all(&((MAX_MESSAGE as u32) + 1).to_be_bytes())
+            .unwrap();
+        server.join().unwrap();
+        let mut rest = Vec::new();
+        assert_eq!(
+            ours.read_to_end(&mut rest).unwrap(),
+            0,
+            "closed without a reply"
+        );
+    }
+
+    #[test]
+    fn a_connection_whose_process_is_gone_gets_nothing() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let gone = Pidfd::open(child.id()).unwrap();
+        child.wait().unwrap();
+        let (mut orphaned, state, _dir) = connection(gone);
+        assert!(orphaned.answer(&[REQUEST_IDENTITIES], &state).is_err());
+        let (mut alive, state, _dir) = connection(me());
+        assert_eq!(
+            alive.answer(&[REQUEST_IDENTITIES], &state).unwrap(),
+            [IDENTITIES_ANSWER, 0, 0, 0, 0]
+        );
     }
 
     #[test]

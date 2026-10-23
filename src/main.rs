@@ -2,6 +2,7 @@ mod agent;
 mod daemon;
 mod fs;
 mod keys;
+mod limits;
 mod procs;
 mod protocol;
 mod secret;

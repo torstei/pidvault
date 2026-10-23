@@ -49,15 +49,32 @@ pub fn seal(
     Ok((encrypt(&plain, passphrase, work_factor)?, skipped))
 }
 
+/// scrypt cost (log2) for what sshvault itself encrypts with a passphrase: 256 MiB and
+/// around a second, fixed so that the daemon's limit below leaves room.
+pub const PASSPHRASE_WORK_FACTOR: u8 = 18;
+
+/// The highest scrypt cost spent on decrypting a file: anyone may hand the daemon one, and
+/// each step up doubles the memory (2^20 takes 1 GiB).
+pub const MAX_WORK_FACTOR: u8 = 20;
+
+#[derive(Debug)]
+pub struct WrongPassphrase;
+
+impl std::fmt::Display for WrongPassphrase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("wrong passphrase")
+    }
+}
+
+impl std::error::Error for WrongPassphrase {}
+
 pub fn encrypt(
     plaintext: &[u8],
     passphrase: SecretString,
     work_factor: Option<u8>,
 ) -> Result<Vec<u8>> {
     let mut recipient = age::scrypt::Recipient::new(passphrase);
-    if let Some(log_n) = work_factor {
-        recipient.set_work_factor(log_n);
-    }
+    recipient.set_work_factor(work_factor.unwrap_or(PASSPHRASE_WORK_FACTOR));
     let encryptor = age::Encryptor::with_recipients(std::iter::once(&recipient as _))?;
     let mut out = Vec::new();
     let mut writer = encryptor.wrap_output(&mut out)?;
@@ -67,11 +84,20 @@ pub fn encrypt(
 }
 
 pub fn decrypt(ciphertext: &[u8], passphrase: SecretString) -> Result<SecretBuf> {
-    let identity = age::scrypt::Identity::new(passphrase);
+    let mut identity = age::scrypt::Identity::new(passphrase);
+    identity.set_max_work_factor(MAX_WORK_FACTOR);
     let decryptor = age::Decryptor::new(ciphertext)?;
     let reader = decryptor
         .decrypt(std::iter::once(&identity as _))
-        .map_err(|e| anyhow::anyhow!("cannot open vault: {e}"))?;
+        .map_err(|e| match e {
+            age::DecryptError::DecryptionFailed
+            | age::DecryptError::KeyDecryptionFailed
+            | age::DecryptError::NoMatchingKeys => anyhow::Error::new(WrongPassphrase),
+            age::DecryptError::ExcessiveWork { required, .. } => anyhow::anyhow!(
+                "this file needs scrypt cost 2^{required}, more than the 2^{MAX_WORK_FACTOR} sshvault spends"
+            ),
+            other => anyhow::anyhow!("cannot open vault: {other}"),
+        })?;
     Ok(SecretBuf::from_reader(reader, ciphertext.len())?)
 }
 
@@ -283,6 +309,33 @@ mod tests {
     fn contents_cannot_be_opened_with_the_passphrase_itself() {
         let (_, stored) = stored("pw");
         assert!(decrypt(&stored.contents, secret("pw")).is_err());
+    }
+
+    #[test]
+    fn a_wrong_passphrase_is_recognisable() {
+        let sealed = encrypt(b"x", secret("right"), Some(4)).unwrap();
+        let err = decrypt(&sealed, secret("wrong")).err().unwrap();
+        assert!(err.downcast_ref::<WrongPassphrase>().is_some(), "{err:#}");
+    }
+
+    #[test]
+    fn files_demanding_too_much_work_are_refused_without_doing_it() {
+        // a cheap file whose header claims a higher cost: age refuses on that field alone
+        let cheap = encrypt(b"x", secret("pw"), Some(4)).unwrap();
+        let text = String::from_utf8_lossy(&cheap).into_owned();
+        let claimed = format!(" {}\n", MAX_WORK_FACTOR + 1);
+        let sealed: Vec<u8> = text
+            .lines()
+            .map(|line| match line.strip_prefix("-> scrypt ") {
+                Some(rest) => format!("-> scrypt {}{claimed}", rest.rsplit_once(' ').unwrap().0),
+                None => format!("{line}\n"),
+            })
+            .collect::<String>()
+            .into_bytes();
+        let started = std::time::Instant::now();
+        let err = decrypt(&sealed, secret("pw")).err().unwrap();
+        assert!(format!("{err}").contains("scrypt cost"), "{err:#}");
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
     }
 
     #[test]
