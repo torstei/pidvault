@@ -45,16 +45,51 @@ impl Fixture {
             .tempdir_in("/tmp")
             .unwrap();
         let mut fixture = Fixture { dir, daemon: None };
-        let daemon = fixture
+        fixture.spawn_daemon();
+        Some(fixture)
+    }
+
+    fn spawn_daemon(&mut self) {
+        let daemon = self
             .command(BIN)
-            .args(["daemon", "--unprivileged", "--state-dir"])
-            .arg(fixture.path("state"))
+            .args([
+                "daemon",
+                "--unprivileged",
+                "--work-factor",
+                "10",
+                "--state-dir",
+            ])
+            .arg(self.path("state"))
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        fixture.daemon = Some(daemon);
-        fixture.wait_until_serving();
-        Some(fixture)
+        self.daemon = Some(daemon);
+        self.wait_until_serving();
+    }
+
+    fn stop_daemon(&mut self) {
+        if let Some(mut daemon) = self.daemon.take() {
+            unsafe { libc::kill(daemon.id() as i32, libc::SIGTERM) };
+            let _ = daemon.wait();
+        }
+    }
+
+    fn restart_daemon(&mut self) {
+        self.stop_daemon();
+        self.spawn_daemon();
+    }
+
+    /// Waits until the daemon holds no unlocked shell, and so no decrypted tree.
+    fn wait_until_locked(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let o = self.command(BIN).arg("status").output().unwrap();
+            if stdout(&o).contains("(0 ") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("daemon still holds unlocked shells");
     }
 
     fn create_vault(&self, src: &Path) -> Output {
@@ -122,10 +157,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if let Some(mut daemon) = self.daemon.take() {
-            unsafe { libc::kill(daemon.id() as i32, libc::SIGTERM) };
-            let _ = daemon.wait();
-        }
+        self.stop_daemon();
     }
 }
 
@@ -144,7 +176,8 @@ fn run_with_stdin(mut cmd: Command, input: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    writeln!(child.stdin.take().unwrap(), "{input}").unwrap();
+    // the command may exit before reading, e.g. when it refuses straight away
+    let _ = writeln!(child.stdin.take().unwrap(), "{input}");
     child.wait_with_output().unwrap()
 }
 
@@ -243,14 +276,140 @@ fn lock_revokes_access_for_the_shell() {
 }
 
 #[test]
-fn vault_is_read_only() {
+fn edits_from_an_unlocked_shell_persist() {
+    let Some(mut f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let edit = r#"
+        set -e
+        cd "$MNT"
+        echo "  Port 2222" >> config
+        sed -i 's/User fromvault/User edited/' config
+        mkdir keys
+        printf secret > keys/id
+        chmod 644 keys/id
+        stat -c %a keys/id
+        mv keys/id keys/id_moved
+        touch scratch && rm scratch
+    "#;
+    let o = f.unlocked_shell(edit);
+    assert_eq!(stdout(&o), "600\n", "{o:?}");
+    let expected = "Host x\n  User edited\n  Port 2222\n";
+
+    f.wait_until_locked();
+    let read_back = "cat \"$MNT/config\" \"$MNT/keys/id_moved\"; ls \"$MNT\"";
+    assert_eq!(
+        stdout(&f.unlocked_shell(read_back)),
+        format!("{expected}secretconfig\nkeys\n")
+    );
+
+    f.restart_daemon();
+    assert_eq!(
+        stdout(&f.unlocked_shell(read_back)),
+        format!("{expected}secretconfig\nkeys\n")
+    );
+}
+
+#[test]
+fn only_unlocked_shells_can_write() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let mut shell = f
+        .command("sh")
+        .env("PW", PASSPHRASE)
+        .args(["-c", "printf '%s\\n' \"$PW\" | \"$SV\" unlock --passphrase-stdin >/dev/null && echo $$ && sleep 30"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(shell.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+
+    let attempts = [
+        "echo planted > \"$MNT/new\"",
+        "echo planted >> \"$MNT/config\"",
+        "rm \"$MNT/config\"",
+        "mkdir \"$MNT/dir\"",
+        "echo planted > \"$SSHVAULT_MOUNT/new\"",
+    ];
+    let results: Vec<Output> = attempts.iter().map(|a| f.outsider(a)).collect();
+    let content = stdout(&f.unlocked_shell("cat \"$MNT/config\"; ls \"$MNT\""));
+    shell.kill().unwrap();
+    shell.wait().unwrap();
+
+    for (attempt, o) in attempts.iter().zip(results) {
+        assert!(!o.status.success(), "{attempt} succeeded");
+    }
+    assert_eq!(content, format!("{CONFIG}config\n"));
+}
+
+#[test]
+fn the_vault_cannot_grow_past_its_limit() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let o = f.unlocked_shell("head -c 5000000 /dev/zero 2>&1 > \"$MNT/big\" || echo refused");
+    let out = stdout(&o);
+    assert!(
+        out.contains("No space left on device") && out.contains("refused"),
+        "{o:?}"
+    );
+}
+
+#[test]
+fn passwd_changes_the_passphrase_and_keeps_unsaved_edits() {
     let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
         return;
     };
     let o = f.unlocked_shell(
-        "echo planted >> \"$MNT/config\" || echo refused; touch \"$MNT/new\" || echo refused",
+        "echo '  Port 2222' >> \"$MNT/config\" && printf '%s\\n%s\\n' \"$PW\" new-pass | \"$SV\" passwd --passphrase-stdin",
     );
-    assert_eq!(stdout(&o), "refused\nrefused\n");
+    assert!(o.status.success(), "{o:?}");
+    f.wait_until_locked();
+
+    let old = f.outsider("echo \"$PW\" | \"$SV\" unlock --passphrase-stdin");
+    assert!(!old.status.success());
+    let o = f.outsider(
+        "echo new-pass | \"$SV\" unlock --passphrase-stdin >/dev/null && cat \"$MNT/config\"",
+    );
+    assert_eq!(stdout(&o), format!("{CONFIG}  Port 2222\n"));
+}
+
+#[test]
+fn export_needs_the_vault_passphrase() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let out = f.path("export.age");
+    let o = f.unlocked_shell(&format!(
+        "echo wrong | \"$SV\" export --passphrase-stdin '{}'",
+        out.display()
+    ));
+    assert!(!o.status.success());
+    assert!(!out.exists());
+}
+
+#[test]
+fn an_export_includes_edits_not_yet_saved() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let out = f.path("export.age");
+    let o = f.unlocked_shell(&format!(
+        "echo '  Port 2222' >> \"$MNT/config\" && printf '%s\\n' \"$PW\" | \"$SV\" export --passphrase-stdin '{}'",
+        out.display()
+    ));
+    assert!(o.status.success(), "{o:?}");
+    let Some(new) = Fixture::start_empty() else {
+        return;
+    };
+    assert!(import(&new, &out, PASSPHRASE).status.success());
+    assert_eq!(
+        stdout(&new.unlocked_shell("cat \"$MNT/config\"")),
+        format!("{CONFIG}  Port 2222\n")
+    );
 }
 
 fn write_stub(f: &Fixture) -> PathBuf {
@@ -483,7 +642,10 @@ fn uid() -> u32 {
 }
 
 fn export_from_unlocked_shell(f: &Fixture, to: &Path) -> Output {
-    f.unlocked_shell(&format!("\"$SV\" export '{}'", to.display()))
+    f.unlocked_shell(&format!(
+        "printf '%s\\n' \"$PW\" | \"$SV\" export --passphrase-stdin '{}'",
+        to.display()
+    ))
 }
 
 /// Imports from a shell that has not been unlocked.
@@ -588,6 +750,67 @@ fn replacing_a_vault_needs_an_unlocked_shell_and_keeps_the_old_one() {
     ]);
     let o = shell.output().unwrap();
     assert_eq!(stdout(&o), OTHER, "{o:?}");
-    let previous = f.path(&format!("state/{}/vault.age.previous", uid()));
+    let previous = f.path(&format!("state/{}/vault.sshvault.previous", uid()));
     assert!(previous.exists(), "no backup at {}", previous.display());
+}
+
+#[test]
+fn ssh_records_host_keys_in_the_vault_and_ssh_keygen_can_remove_them() {
+    let keys = tempfile::tempdir().unwrap();
+    let key = keys.path().join("id_test");
+    assert!(
+        Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let private = std::fs::read_to_string(&key).unwrap();
+    let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+    let Some(sshd) = start_sshd(keys.path(), &public) else {
+        return;
+    };
+    let user = std::env::var("USER").unwrap();
+    let config = format!(
+        "Host vaulthost\n  HostName 127.0.0.1\n  Port {}\n  User {user}\n  IdentityFile @MNT@/id_test\n  \
+         IdentitiesOnly yes\n  IdentityAgent none\n  BatchMode yes\n  UserKnownHostsFile @MNT@/known_hosts\n  \
+         StrictHostKeyChecking accept-new\n  LogLevel ERROR\n",
+        sshd.port
+    );
+    let Some(f) = Fixture::start(&[("config", &config), ("id_test", &private)]) else {
+        return;
+    };
+    let stub = write_stub(&f);
+    let first = f.unlocked_shell(&format!("ssh -F {} vaulthost echo first", stub.display()));
+    assert_eq!(stdout(&first), "first\n", "{first:?}");
+
+    f.wait_until_locked();
+    let strict = f.unlocked_shell(&format!(
+        "ssh -F {} -o StrictHostKeyChecking=yes vaulthost echo known; grep -c . \"$MNT/known_hosts\"",
+        stub.display()
+    ));
+    assert_eq!(stdout(&strict), "known\n1\n", "{strict:?}");
+
+    let removed = f.unlocked_shell(&format!(
+        "ssh-keygen -q -R '[127.0.0.1]:{}' -f \"$MNT/known_hosts\" >/dev/null && grep -c . \"$MNT/known_hosts\"; test -s \"$MNT/known_hosts.old\" && echo backup",
+        sshd.port
+    ));
+    assert_eq!(stdout(&removed), "0\nbackup\n", "{removed:?}");
+}
+
+#[test]
+fn vim_can_edit_the_config() {
+    let Some(vim) = which("vim").or_else(|| which("vim.tiny")) else {
+        eprintln!("skipping: no vim");
+        return;
+    };
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let o = f.unlocked_shell(&format!(
+        "cd \"$MNT\" && '{}' -N -u NONE -es -c '%s/fromvault/vim/' -c wq config </dev/null; cat config; ls -A",
+        vim.display()
+    ));
+    assert_eq!(stdout(&o), "Host x\n  User vim\nconfig\n", "{o:?}");
 }

@@ -4,6 +4,7 @@ mod procs;
 mod protocol;
 mod secret;
 mod sessions;
+mod tree;
 mod users;
 mod vault;
 
@@ -58,6 +59,9 @@ enum Command {
         /// indistinguishable from any other process of that user.
         #[arg(long)]
         unprivileged: bool,
+        /// scrypt cost (log2) for wrapping vault keys; only lower it for tests
+        #[arg(long, hide = true)]
+        work_factor: Option<u8>,
     },
     /// Encrypt a directory and hand it to the daemon as your vault
     Create {
@@ -70,8 +74,20 @@ enum Command {
         #[arg(long, hide = true)]
         work_factor: Option<u8>,
     },
-    /// Write your vault, still encrypted, to FILE (`-` for stdout); needs an unlocked shell
-    Export { file: PathBuf },
+    /// Write your vault, encrypted with its passphrase, to FILE (`-` for stdout);
+    /// needs an unlocked shell
+    Export {
+        file: PathBuf,
+        /// Read the passphrase from the first line of stdin
+        #[arg(long)]
+        passphrase_stdin: bool,
+    },
+    /// Change the passphrase of your vault
+    Passwd {
+        /// Read the old and the new passphrase from the first two lines of stdin
+        #[arg(long)]
+        passphrase_stdin: bool,
+    },
     /// Make an exported vault yours: on a new machine, or replacing your current one
     /// (which needs an unlocked shell and is kept as a backup)
     Import {
@@ -117,12 +133,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             run_as,
             state_dir,
             unprivileged,
+            work_factor,
         } => {
             daemon::run(&daemon::Options {
                 socket: cli.socket,
                 mount: cli.mount,
                 state_dir,
                 run_as: (!unprivileged).then_some(run_as),
+                wrap_work_factor: work_factor,
             })?;
             Ok(ExitCode::SUCCESS)
         }
@@ -169,8 +187,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 &Request::Unlock { passphrase },
             )?)
         }
-        Command::Export { file } => {
-            let reply = protocol::call(&cli.socket, &Request::Export)?;
+        Command::Export {
+            file,
+            passphrase_stdin,
+        } => {
+            if file != Path::new("-") && file.exists() {
+                bail!("{} already exists", file.display());
+            }
+            let passphrase = if passphrase_stdin {
+                passphrase_from_stdin()?
+            } else {
+                prompt("Vault passphrase: ")?
+            };
+            let reply = protocol::call(&cli.socket, &Request::Export { passphrase })?;
             if !reply.ok {
                 bail!("{}", reply.message);
             }
@@ -179,6 +208,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .context("daemon sent a malformed vault")?;
             write_export(&file, &vault)?;
             Ok(ExitCode::SUCCESS)
+        }
+        Command::Passwd { passphrase_stdin } => {
+            let (old, new) = if passphrase_stdin {
+                (passphrase_from_stdin()?, passphrase_from_stdin()?)
+            } else {
+                let old = prompt("Current passphrase: ")?;
+                let new = prompt("New passphrase: ")?;
+                if *new != *prompt("Repeat new passphrase: ")? {
+                    bail!("passphrases do not match");
+                }
+                (old, new)
+            };
+            report(protocol::call(&cli.socket, &Request::Passwd { old, new })?)
         }
         Command::Import {
             file,

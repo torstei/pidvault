@@ -82,20 +82,57 @@ impl SecretBuf {
     }
 
     pub fn extend_from_slice(&mut self, data: &[u8]) -> io::Result<()> {
-        let needed = self.len + data.len();
-        if needed > self.mapped {
-            let mut bigger =
-                SecretBuf::with_capacity(needed.max((self.mapped * 2).min(MAX_SECRET)))?;
-            bigger.copy_in(self);
-            *self = bigger;
-        }
-        self.copy_in(data);
+        self.write_at(self.len, data)
+    }
+
+    /// Writes `data` at `offset`, growing the buffer; a gap reads as zeros.
+    pub fn write_at(&mut self, offset: usize, data: &[u8]) -> io::Result<()> {
+        let end = offset
+            .checked_add(data.len())
+            .ok_or_else(|| io::Error::other("offset overflow"))?;
+        self.reserve(end)?;
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.add(offset), data.len()) };
+        self.len = self.len.max(end);
         Ok(())
     }
 
-    fn copy_in(&mut self, data: &[u8]) {
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.add(self.len), data.len()) };
-        self.len += data.len();
+    pub fn truncate(&mut self, len: usize) -> io::Result<()> {
+        if len < self.len {
+            unsafe { std::slice::from_raw_parts_mut(self.ptr.add(len), self.len - len) }.zeroize();
+        } else {
+            self.reserve(len)?;
+        }
+        self.len = len;
+        Ok(())
+    }
+
+    pub fn try_clone(&self) -> io::Result<SecretBuf> {
+        let mut copy = SecretBuf::with_capacity(self.len)?;
+        copy.extend_from_slice(self)?;
+        Ok(copy)
+    }
+
+    // Bytes past `len` are always zero: fresh mappings are, and truncate wipes what it drops.
+    fn reserve(&mut self, needed: usize) -> io::Result<()> {
+        if needed > self.mapped {
+            let mut bigger =
+                SecretBuf::with_capacity(needed.max((self.mapped * 2).min(MAX_SECRET)))?;
+            unsafe { std::ptr::copy_nonoverlapping(self.ptr, bigger.ptr, self.len) };
+            bigger.len = self.len;
+            *self = bigger;
+        }
+        Ok(())
+    }
+}
+
+impl io::Write for SecretBuf {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.extend_from_slice(data)?;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -144,6 +181,19 @@ mod tests {
     fn memory_is_locked_while_held() {
         let buf = SecretBuf::with_capacity(64 * 1024).unwrap();
         assert_eq!(locked_kb_of(buf.ptr as usize), 64);
+    }
+
+    #[test]
+    fn writes_at_offsets_and_truncates_with_zeroed_gaps() {
+        let mut buf = SecretBuf::with_capacity(4).unwrap();
+        buf.write_at(0, b"abcd").unwrap();
+        buf.write_at(6000, b"z").unwrap();
+        assert_eq!(buf.len(), 6001);
+        assert!(buf[4..6000].iter().all(|&b| b == 0));
+        buf.truncate(2).unwrap();
+        assert_eq!(&*buf, b"ab");
+        buf.truncate(5).unwrap();
+        assert_eq!(&*buf, b"ab\0\0\0");
     }
 
     #[test]

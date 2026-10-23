@@ -24,8 +24,16 @@ pub enum Request {
         vault: String,
         passphrase: Zeroizing<String>,
     },
-    /// Returns the stored vault, still encrypted, to an unlocked caller.
-    Export,
+    /// Returns the vault encrypted with `passphrase`, which must be the vault's, to an
+    /// unlocked caller.
+    Export {
+        passphrase: Zeroizing<String>,
+    },
+    /// Re-encrypts the vault key under a new passphrase.
+    Passwd {
+        old: Zeroizing<String>,
+        new: Zeroizing<String>,
+    },
     Unlock {
         passphrase: Zeroizing<String>,
     },
