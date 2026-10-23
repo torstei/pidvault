@@ -372,8 +372,9 @@ fn passwd_changes_the_passphrase_and_keeps_unsaved_edits() {
     assert!(o.status.success(), "{o:?}");
     f.wait_until_locked();
 
-    let old = f.outsider("echo \"$PW\" | \"$SV\" unlock --passphrase-stdin");
-    assert!(!old.status.success());
+    let old = f.outsider(&format!("echo '{PASSPHRASE}' | \"$SV\" unlock --passphrase-stdin"));
+    assert!(stderr_of(&old).contains("wrong passphrase"), "{old:?}");
+    std::thread::sleep(Duration::from_millis(1200));
     let o = f.outsider(
         "echo new-pass | \"$SV\" unlock --passphrase-stdin >/dev/null && cat \"$MNT/config\"",
     );
@@ -1241,4 +1242,18 @@ fn an_unlock_for_a_while_ends_by_itself() {
         out.ends_with("default: locked here (0 of your other shells have it unlocked)\n"),
         "{o:?}"
     );
+}
+
+#[test]
+fn a_wrong_passphrase_makes_the_next_try_wait() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let o = f.outsider(&format!(
+        r#"echo wrong | "$SV" unlock --passphrase-stdin 2>&1 | grep -c 'wrong passphrase'
+           echo '{PASSPHRASE}' | "$SV" unlock --passphrase-stdin 2>&1 | grep -c 'try again in'
+           sleep 1.2
+           echo '{PASSPHRASE}' | "$SV" unlock --passphrase-stdin | grep -c unlocked"#
+    ));
+    assert_eq!(stdout(&o), "1\n1\n1\n", "{o:?}");
 }

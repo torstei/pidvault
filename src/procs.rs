@@ -46,6 +46,26 @@ impl Pidfd {
     }
 }
 
+/// A pidfd for the process at the other end of `stream`, as it was when it connected; on
+/// kernels before 6.5, which cannot give one, opened from its pid instead.
+pub fn peer_pidfd(stream: &UnixStream, pid: u32) -> io::Result<Pidfd> {
+    let mut fd: libc::c_int = -1;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERPIDFD,
+            (&raw mut fd).cast(),
+            &mut len,
+        )
+    };
+    if rc == 0 && fd >= 0 {
+        return Ok(Pidfd(unsafe { OwnedFd::from_raw_fd(fd) }));
+    }
+    Pidfd::open(pid)
+}
+
 pub trait Liveness {
     fn has_exited(&self) -> bool;
 }

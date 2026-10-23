@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use signature::Signer;
+use signature::{RandomizedSigner, Signer};
 use ssh_encoding::Encode;
 use ssh_key::private::KeypairData;
 use ssh_key::{Algorithm, HashAlg, PrivateKey, Signature};
@@ -108,7 +108,11 @@ where
         uint(&keypair.private.d),
         vec![uint(&keypair.private.p), uint(&keypair.private.q)],
     )?;
-    let raw: rsa::pkcs1v15::Signature = rsa::pkcs1v15::SigningKey::<D>::new(key).try_sign(data)?;
+    // randomised, so the private exponent is blinded: the rsa crate's arithmetic is not
+    // constant-time (RUSTSEC-2023-0071, unfixed), and anything in an unlocked shell may
+    // time as many signatures as it likes
+    let raw: rsa::pkcs1v15::Signature = rsa::pkcs1v15::SigningKey::<D>::new(key)
+        .try_sign_with_rng(&mut rsa::rand_core::OsRng, data)?;
     Ok(Signature::new(
         Algorithm::Rsa { hash: Some(hash) },
         Box::<[u8]>::from(raw).into_vec(),

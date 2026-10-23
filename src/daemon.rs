@@ -12,6 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::agent;
 use crate::fs::{self, Shared, State, Unlocked, VaultFs, VaultState};
+use crate::limits::{self, Connections, Guesses};
 use crate::procs::{self, Pidfd};
 use crate::protocol::{self, Request, Response, VaultStatus};
 use crate::systemd;
@@ -169,21 +170,36 @@ pub fn run(options: &Options) -> Result<()> {
     {
         let ctx = Arc::new(Daemon {
             state: state.clone(),
+            guesses: Guesses::default(),
             wrap_work_factor: options.wrap_work_factor,
         });
+        let connections = Connections::new(MAX_CONNECTIONS, MAX_CONNECTIONS_PER_USER);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
+                let Some(admitted) = admit(&connections, &stream) else {
+                    continue;
+                };
                 let ctx = ctx.clone();
-                std::thread::spawn(move || serve(&stream, &ctx));
+                std::thread::spawn(move || {
+                    serve(&stream, &ctx);
+                    drop(admitted);
+                });
             }
         });
     }
     {
         let state = state.clone();
+        let connections = Connections::new(MAX_CONNECTIONS, MAX_CONNECTIONS_PER_USER);
         std::thread::spawn(move || {
             for stream in agent_listener.incoming().flatten() {
+                let Some(admitted) = admit(&connections, &stream) else {
+                    continue;
+                };
                 let state = state.clone();
-                std::thread::spawn(move || agent::serve(stream, &state));
+                std::thread::spawn(move || {
+                    agent::serve(stream, &state);
+                    drop(admitted);
+                });
             }
         });
     }
@@ -241,7 +257,18 @@ fn sockets_from_systemd(options: &Options) -> Result<(UnixListener, UnixListener
     ))
 }
 
+const MAX_CONNECTIONS: usize = 1024;
+const MAX_CONNECTIONS_PER_USER: usize = 64;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn admit(connections: &Arc<Connections>, stream: &UnixStream) -> Option<limits::Admitted> {
+    let peer = procs::peer_cred(stream).ok()?;
+    connections.admit(peer.uid)
+}
+
 fn serve(stream: &UnixStream, ctx: &Daemon) {
+    let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(REQUEST_TIMEOUT));
     let response = handle(stream, ctx).unwrap_or_else(|e| Response {
         ok: false,
         message: format!("{e:#}"),
@@ -253,6 +280,7 @@ fn serve(stream: &UnixStream, ctx: &Daemon) {
 
 pub struct Daemon {
     pub state: Shared,
+    pub guesses: Guesses,
     /// scrypt cost for wrapping K with a passphrase; only lowered for tests
     pub wrap_work_factor: Option<u8>,
 }
@@ -307,10 +335,14 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 .decode(data)
                 .context("vault is not valid base64")?;
             vault::check_sealed(&ciphertext)?;
-            let tree = Tree::from_tar(&vault::decrypt(&ciphertext, secret(&passphrase))?)?;
+            let tree = Tree::from_tar(&limits::expensive(|| {
+                vault::decrypt(&ciphertext, secret(&passphrase))
+            })?)?;
             let key = Key::generate()?;
             let stored = Stored {
-                wrapped_key: key.wrap(secret(&passphrase), ctx.wrap_work_factor)?,
+                wrapped_key: limits::expensive(|| {
+                    key.wrap(secret(&passphrase), ctx.wrap_work_factor)
+                })?,
                 contents: key.seal_tree(&tree)?,
             };
             with_vault(ctx, &peer, &name, |vault| {
@@ -344,12 +376,16 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                     _ => bail!("export {}", needs_unlock(&name)),
                 }
             })?;
-            let key = Key::unwrap(&wrapped_key, secret(&passphrase))?;
+            let key = ctx.guesses.check(peer.uid, || {
+                limits::expensive(|| Key::unwrap(&wrapped_key, secret(&passphrase)))
+            })?;
             let archive = with_vault(ctx, &peer, &name, |vault| match &vault.open {
                 Some(open) if open.key.same_as(&key) => open.tree.to_tar(),
                 _ => bail!("`{name}` changed during export; try again"),
             })?;
-            let sealed = vault::encrypt(&archive, secret(&passphrase), ctx.wrap_work_factor)?;
+            let sealed = limits::expensive(|| {
+                vault::encrypt(&archive, secret(&passphrase), ctx.wrap_work_factor)
+            })?;
             exported = Some(base64::engine::general_purpose::STANDARD.encode(sealed));
             String::new()
         }
@@ -364,8 +400,10 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                     .with_context(|| format!("you have no vault `{name}`"))?
                     .wrapped_key),
             })?;
-            let key = Key::unwrap(&wrapped_key, secret(&old))?;
-            let rewrapped = key.wrap(secret(&new), ctx.wrap_work_factor)?;
+            let key = ctx.guesses.check(peer.uid, || {
+                limits::expensive(|| Key::unwrap(&wrapped_key, secret(&old)))
+            })?;
+            let rewrapped = limits::expensive(|| key.wrap(secret(&new), ctx.wrap_work_factor))?;
             with_vault(ctx, &peer, &name, |vault| {
                 match &vault.open {
                     Some(open) if open.key.same_as(&key) => vault.rewrap(rewrapped)?,
@@ -398,7 +436,9 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 bail!("you have no vault `{name}`; create one with `sshvault create {name}`");
             }
             let stored = Stored::read(&path)?;
-            let key = Key::unwrap(&stored.wrapped_key, secret(&passphrase))?;
+            let key = ctx.guesses.check(peer.uid, || {
+                limits::expensive(|| Key::unwrap(&stored.wrapped_key, secret(&passphrase)))
+            })?;
             with_vault(ctx, &peer, &name, |vault| {
                 // a vault already held keeps its unsaved changes; this unlock only proves the passphrase
                 match &vault.open {

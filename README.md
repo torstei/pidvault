@@ -147,6 +147,10 @@ secret, so a key is protected from the moment it is written:
   checks that on every request: lock the vault and its keys stop working at once.
   Asking the agent to add or remove keys (`ssh-add`) is refused; keys get in by being
   written to a vault.
+- Prefer ed25519 keys. The agent signs with RSA through the `rsa` crate, whose arithmetic
+  is not constant-time ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071),
+  unfixed); every RSA signature is blinded against timing, but a process in an unlocked
+  shell may time as many as it likes, and ed25519 does not have the problem.
 - Everything else stays an ordinary file: `config`, `known_hosts`, `.pub` files, and keys
   with a passphrase (which the agent cannot use; `ssh-keygen -p -N '' -f KEY` removes
   the passphrase, after which the key is protected). Keys in the old PEM format stay
@@ -240,6 +244,11 @@ already unlocked see the new contents at once.
   wiped when that user's last unlocked shell exits — after any unsaved change is saved.
   Unlocking another shell while one is open only checks the passphrase and keeps what is
   in memory.
+- The daemon is reachable by everyone, so it limits what anyone can make it do: passphrase
+  checks run one at a time per user, and after each wrong passphrase the next waits twice
+  as long, up to half a minute, so a process cannot guess at the daemon's expense;
+  scrypt runs one at a time across the daemon, at most at cost 2^20, whatever a supplied
+  file asks for; and connections are capped per user and in total.
 - `unlock` registers the shell that ran it, and only if that shell is in the same session:
   a client orphaned with `(sshvault unlock &)` is adopted by `systemd --user`, which must
   not end up unlocking the whole login.
