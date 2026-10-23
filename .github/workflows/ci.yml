@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install FUSE and sshd for the end-to-end tests
+        run: sudo apt-get update -q && sudo apt-get install -y -q fuse3 openssh-server
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Give the runner user access to KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm-runner.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install QEMU and image tooling
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q qemu-system-x86 qemu-utils genisoimage gpgv ubuntu-cloudimage-keyring
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-deb
+            target
+          key: vm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/sshvault-vm
+          key: cloud-image-${{ hashFiles('tests/vm/run.sh') }}
+      - name: Install cargo-deb
+        run: command -v cargo-deb || cargo install cargo-deb --locked
+      - name: Run the VM tests
+        env:
+          SSHVAULT_VM_KEEP: "1"
+          TMPDIR: ${{ runner.temp }}
+        run: tests/vm/run.sh
+      - name: Keep the VM logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vm-logs
+          path: |
+            ${{ runner.temp }}/sshvault-vm.*/console.log
+            ${{ runner.temp }}/sshvault-vm.*/results.clean.tap
