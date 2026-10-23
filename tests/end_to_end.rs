@@ -1209,3 +1209,36 @@ fn ssh_dash_f_on_the_vault_config_works_without_the_stub() {
     ));
     assert_eq!(stdout(&o), "logged-in\n", "{o:?}");
 }
+
+#[test]
+fn an_unlock_for_a_while_ends_by_itself() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let o = f
+        .command("sh")
+        .env("PW", PASSPHRASE)
+        .args([
+            "-c",
+            r#"printf '%s\n' "$PW" | "$SV" unlock --for 2s --passphrase-stdin
+           ssh-keygen -q -t ed25519 -N '' -C timed -f "$MNT/id_timed"
+           "$SV" status | grep -c 'for another'
+           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l | grep -c timed
+           sleep 3
+           cat "$MNT/config" 2>/dev/null || echo locked
+           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l
+           "$SV" status"#,
+        ])
+        .output()
+        .unwrap();
+    let out = stdout(&o);
+    assert!(out.starts_with("`default` unlocked for shell"), "{o:?}");
+    assert!(
+        out.contains(" for 2s (1 files)\n1\n1\nlocked\nThe agent has no identities.\n"),
+        "{o:?}"
+    );
+    assert!(
+        out.ends_with("default: locked here (0 of your other shells have it unlocked)\n"),
+        "{o:?}"
+    );
+}
