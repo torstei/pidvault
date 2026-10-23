@@ -94,9 +94,11 @@ impl Fixture {
 
     fn create_vault(&self, src: &Path) -> Output {
         let mut create = self.command(BIN);
+        // run straight from the test process, which must not become an unlocked shell
         create
             .args([
                 "create",
+                "--no-unlock",
                 "--passphrase-stdin",
                 "--work-factor",
                 "10",
@@ -689,9 +691,12 @@ fn an_export_moves_to_a_new_machine() {
     let Some(new) = Fixture::start_empty() else {
         return;
     };
-    let o = import(&new, &out, PASSPHRASE);
-    assert!(o.status.success(), "{o:?}");
-    assert_eq!(stdout(&new.unlocked_shell("cat \"$MNT/config\"")), CONFIG);
+    let o = new.outsider(&format!(
+        "echo '{PASSPHRASE}' | \"$SV\" import --passphrase-stdin '{}' >/dev/null && cat \"$MNT/config\"",
+        out.display()
+    ));
+    assert_eq!(stdout(&o), CONFIG, "import should unlock its shell: {o:?}");
+    assert_eq!(stdout(&new.outsider("cat \"$MNT/config\"")), "");
 }
 
 #[test]
@@ -813,4 +818,30 @@ fn vim_can_edit_the_config() {
         vim.display()
     ));
     assert_eq!(stdout(&o), "Host x\n  User vim\nconfig\n", "{o:?}");
+}
+
+#[test]
+fn create_makes_an_empty_vault_and_unlocks_its_shell() {
+    let Some(f) = Fixture::start_empty() else {
+        return;
+    };
+    let o = f.outsider(&format!(
+        "echo '{PASSPHRASE}' | \"$SV\" create --passphrase-stdin --work-factor 10 >/dev/null && ls -A \"$MNT\" && echo 'Host n' > \"$MNT/config\" && cat \"$MNT/config\""
+    ));
+    assert_eq!(stdout(&o), "Host n\n", "{o:?}");
+    assert_eq!(stdout(&f.outsider("cat \"$MNT/config\"")), "");
+    f.wait_until_locked();
+    assert_eq!(stdout(&f.unlocked_shell("cat \"$MNT/config\"")), "Host n\n");
+}
+
+#[test]
+fn create_with_no_unlock_leaves_the_shell_locked() {
+    let Some(f) = Fixture::start_empty() else {
+        return;
+    };
+    let o = f.outsider(&format!(
+        "echo '{PASSPHRASE}' | \"$SV\" create --no-unlock --passphrase-stdin --work-factor 10 >/dev/null && \"$SV\" status"
+    ));
+    assert_eq!(o.status.code(), Some(1), "{o:?}");
+    assert!(stdout(&o).starts_with("locked"), "{o:?}");
 }

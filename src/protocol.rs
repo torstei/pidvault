@@ -18,11 +18,14 @@ const MAX_REQUEST: u64 = 8 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// Stores `vault`, a base64 age file, after checking that `passphrase` opens it.
-    /// Replacing an existing vault needs an unlocked caller.
+    /// Stores `vault`, a base64 age file, after checking that `passphrase` opens it,
+    /// and with `unlock` unlocks the calling shell. Replacing an existing vault needs an
+    /// unlocked caller.
     Import {
         vault: String,
         passphrase: Zeroizing<String>,
+        #[serde(default)]
+        unlock: bool,
     },
     /// Returns the vault encrypted with `passphrase`, which must be the vault's, to an
     /// unlocked caller.

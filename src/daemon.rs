@@ -207,7 +207,16 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
 
     let mut exported = None;
     let message = match request {
-        Request::Import { vault, passphrase } => {
+        Request::Import {
+            vault,
+            passphrase,
+            unlock,
+        } => {
+            let shell = if unlock {
+                Some(calling_shell(&peer)?)
+            } else {
+                None
+            };
             let ciphertext = base64::engine::general_purpose::STANDARD
                 .decode(vault)
                 .context("vault is not valid base64")?;
@@ -227,14 +236,19 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 bail!("replacing your vault {NEEDS_UNLOCK}");
             }
             stored.write(&user.vault_path, true)?;
-            if user.open.is_some() {
+            if user.open.is_some() || shell.is_some() {
                 user.hold(Unlocked::new(tree, key, stored.wrapped_key));
             }
-            if replacing {
+            let mut message = if replacing {
                 "vault replaced; the previous one is kept as a backup".to_string()
             } else {
                 "vault stored".to_string()
+            };
+            if let Some((shell, handle)) = shell {
+                user.sessions.register(shell, handle);
+                message.push_str(&format!("; shell {shell} unlocked"));
             }
+            message
         }
         Request::Export { passphrase } => {
             let wrapped_key = {
@@ -294,21 +308,9 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             "passphrase changed".to_string()
         }
         Request::Unlock { passphrase } => {
-            let shell = procs::parent_of(peer.pid).context("cannot determine calling shell")?;
-            let handle = Pidfd::open(shell).context("cannot track calling shell")?;
-            // a pid read before the pidfd was opened might already belong to someone else
-            if procs::parent_of(peer.pid) != Some(shell)
-                || procs::real_uid_of(shell) != Some(peer.uid)
-            {
-                bail!("calling shell changed or belongs to another user");
-            }
-            // an orphaned client is adopted by a subreaper such as `systemd --user`,
-            // whose descendants are the whole login; it leads a session of its own
-            if shell <= 1 || procs::session_of(shell) != procs::session_of(peer.pid) {
-                bail!("unlock must be run directly from the shell it is meant for");
-            }
+            let (shell, handle) = calling_shell(&peer)?;
             if !vault_path.exists() {
-                bail!("you have no vault yet; create one with `sshvault create --from DIR`");
+                bail!("you have no vault yet; create one with `sshvault create`");
             }
             let stored = Stored::read(&vault_path)?;
             let key = Key::unwrap(&stored.wrapped_key, secret(&passphrase))?;
@@ -362,6 +364,22 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
         has_vault: vault_path.exists(),
         vault: exported,
     })
+}
+
+/// The shell that ran the client, which an unlock is for.
+fn calling_shell(peer: &procs::PeerCred) -> Result<(u32, Pidfd)> {
+    let shell = procs::parent_of(peer.pid).context("cannot determine calling shell")?;
+    let handle = Pidfd::open(shell).context("cannot track calling shell")?;
+    // a pid read before the pidfd was opened might already belong to someone else
+    if procs::parent_of(peer.pid) != Some(shell) || procs::real_uid_of(shell) != Some(peer.uid) {
+        bail!("calling shell changed or belongs to another user");
+    }
+    // an orphaned client is adopted by a subreaper such as `systemd --user`,
+    // whose descendants are the whole login; it leads a session of its own
+    if shell <= 1 || procs::session_of(shell) != procs::session_of(peer.pid) {
+        bail!("run sshvault directly from the shell it is meant to unlock");
+    }
+    Ok((shell, handle))
 }
 
 fn bind_socket(path: &Path, public: bool) -> Result<UnixListener> {

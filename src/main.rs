@@ -63,10 +63,14 @@ enum Command {
         #[arg(long, hide = true)]
         work_factor: Option<u8>,
     },
-    /// Encrypt a directory and hand it to the daemon as your vault
+    /// Create your vault, empty or from a directory, and unlock the calling shell
     Create {
+        /// Start from the files in this directory instead of an empty vault
         #[arg(long)]
-        from: PathBuf,
+        from: Option<PathBuf>,
+        /// Leave the calling shell locked
+        #[arg(long)]
+        no_unlock: bool,
         /// Read the passphrase from the first line of stdin
         #[arg(long)]
         passphrase_stdin: bool,
@@ -88,10 +92,13 @@ enum Command {
         #[arg(long)]
         passphrase_stdin: bool,
     },
-    /// Make an exported vault yours: on a new machine, or replacing your current one
-    /// (which needs an unlocked shell and is kept as a backup)
+    /// Make an exported vault yours, and unlock the calling shell: on a new machine, or
+    /// replacing your current one (which needs an unlocked shell and is kept as a backup)
     Import {
         file: PathBuf,
+        /// Leave the calling shell locked
+        #[arg(long)]
+        no_unlock: bool,
         /// Read the file's passphrase from the first line of stdin
         #[arg(long)]
         passphrase_stdin: bool,
@@ -146,6 +153,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Create {
             from,
+            no_unlock,
             passphrase_stdin,
             work_factor,
         } => {
@@ -162,18 +170,25 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
                 first
             };
-            let (sealed, skipped) = vault::seal(
-                &from,
-                SecretString::from(passphrase.to_string()),
-                work_factor,
-            )?;
-            for path in skipped {
-                eprintln!("sshvault: left out {} (not a regular file)", path.display());
-            }
+            let secret = SecretString::from(passphrase.to_string());
+            let sealed = match from {
+                Some(from) => {
+                    let (sealed, skipped) = vault::seal(&from, secret, work_factor)?;
+                    for path in skipped {
+                        eprintln!("sshvault: left out {} (not a regular file)", path.display());
+                    }
+                    sealed
+                }
+                None => vault::encrypt(&tree::Tree::empty().to_tar()?, secret, work_factor)?,
+            };
             let vault = base64::engine::general_purpose::STANDARD.encode(sealed);
             report(protocol::call(
                 &cli.socket,
-                &Request::Import { vault, passphrase },
+                &Request::Import {
+                    vault,
+                    passphrase,
+                    unlock: !no_unlock,
+                },
             )?)
         }
         Command::Unlock { passphrase_stdin } => {
@@ -224,6 +239,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Import {
             file,
+            no_unlock,
             passphrase_stdin,
         } => {
             let ciphertext = read_limited(&file)?;
@@ -237,7 +253,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let vault = base64::engine::general_purpose::STANDARD.encode(ciphertext);
             report(protocol::call(
                 &cli.socket,
-                &Request::Import { vault, passphrase },
+                &Request::Import {
+                    vault,
+                    passphrase,
+                    unlock: !no_unlock,
+                },
             )?)
         }
         Command::Lock { all } => report(protocol::call(&cli.socket, &Request::Lock { all })?),
