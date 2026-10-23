@@ -72,6 +72,20 @@ for now, since the vault is read-only.
 
 Other commands: `sshvault status`, `sshvault lock`, `sshvault lock --all`.
 
+### Backups and moving to another machine
+
+```sh
+sshvault export ~/sshvault-backup.age       # from an unlocked shell
+sshvault import ~/sshvault-backup.age       # on the new machine; prompts for its passphrase
+```
+
+An export is your vault exactly as stored: a standard, passphrase-encrypted
+[age](https://age-encryption.org) file. Only an unlocked shell may export, so your other
+processes cannot even get a copy to try passphrases against. `import` checks the
+passphrase before storing anything. Replacing an existing vault also needs an unlocked
+shell. The old one is kept as `vault.age.previous`, where an administrator can restore
+it, and shells that are already unlocked see the new contents at once.
+
 ## How it works
 
 - One daemon per machine. systemd starts it as root; it mounts a single FUSE filesystem at
@@ -81,8 +95,9 @@ Other commands: `sshvault status`, `sshvault lock`, `sshvault lock --all`.
 - The client refuses a daemon that runs as your own uid or whose socket directory is not
   root's: such a daemon could be any of your processes, waiting for your passphrase.
 - Vaults are passphrase-encrypted `age` archives in `/var/lib/sshvault/<uid>/`, readable
-  only by the daemon. The client encrypts; the daemon stores what it cannot read and
-  refuses to replace an existing vault.
+  only by the daemon. The client encrypts; the daemon checks that the passphrase opens
+  what it is given before storing it, and replaces an existing vault only for an unlocked
+  shell.
 - Every FUSE request carries the caller's pid and uid. Like `/proc/self`, `self` is the
   same path for everyone: each user gets their own directory there (a separate inode, owned
   by that user, mode 0700), and its contents only in a process that is, or descends from,
@@ -100,8 +115,9 @@ Other commands: `sshvault status`, `sshvault lock`, `sshvault lock --all`.
 
 ## Not there yet
 
-- The vault is read-only, and there is no way yet to change it or its passphrase.
-- No `export`/`import` for backups or moving to another machine.
+- The vault is read-only: `known_hosts` cannot be updated in it, and there is no way yet
+  to change its contents or passphrase in place. Making the view writable for unlocked
+  shells is next.
 
 ## Development
 

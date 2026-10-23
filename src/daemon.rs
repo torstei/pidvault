@@ -174,6 +174,7 @@ fn serve(stream: &UnixStream, state: &Shared, state_dir: &Path) {
         unlocked_by: None,
         sessions: 0,
         has_vault: false,
+        vault: None,
     });
     let _ = protocol::write_response(stream, &response);
 }
@@ -183,17 +184,44 @@ fn handle(stream: &UnixStream, state: &Shared, state_dir: &Path) -> Result<Respo
     let vault_path = state_dir.join(peer.uid.to_string()).join("vault.age");
     let request = protocol::read_request(stream)?;
 
+    let mut exported = None;
     let message = match request {
-        Request::Create { vault } => {
+        Request::Import { vault, passphrase } => {
             let ciphertext = base64::engine::general_purpose::STANDARD
                 .decode(vault)
                 .context("vault is not valid base64")?;
             vault::check_sealed(&ciphertext)?;
-            if vault_path.exists() {
-                bail!("you already have a vault");
+            let tree = vault::Tree::from_tar(&vault::decrypt(
+                &ciphertext,
+                SecretString::from(passphrase.to_string()),
+            )?)?;
+            let _serialised = STORE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let replacing = vault_path.exists();
+            if replacing && !is_unlocked(state, &peer) {
+                bail!("replacing your vault needs an unlocked shell; run `sshvault unlock` first");
             }
             vault::store(&vault_path, &ciphertext)?;
-            "vault stored".to_string()
+            let mut state = fs::lock(state);
+            if let Some(user) = state.user_mut(peer.uid)
+                && user.tree.is_some()
+            {
+                user.tree = Some(tree);
+            }
+            if replacing {
+                "vault replaced; the previous one is kept as a backup".to_string()
+            } else {
+                "vault stored".to_string()
+            }
+        }
+        Request::Export => {
+            if !is_unlocked(state, &peer) {
+                bail!("export needs an unlocked shell; run `sshvault unlock` first");
+            }
+            let ciphertext = std::fs::read(&vault_path).context("you have no vault")?;
+            exported = Some(base64::engine::general_purpose::STANDARD.encode(ciphertext));
+            String::new()
         }
         Request::Unlock { passphrase } => {
             let shell = procs::parent_of(peer.pid).context("cannot determine calling shell")?;
@@ -253,7 +281,18 @@ fn handle(stream: &UnixStream, state: &Shared, state_dir: &Path) -> Result<Respo
         unlocked_by: user.and_then(|u| u.unlocked_ancestor(peer.pid)),
         sessions: user.map_or(0, |u| u.sessions.len()),
         has_vault: vault_path.exists(),
+        vault: exported,
     })
+}
+
+/// Serialises replacements, which stage the new vault under a fixed name.
+static STORE: Mutex<()> = Mutex::new(());
+
+fn is_unlocked(state: &Shared, peer: &procs::PeerCred) -> bool {
+    fs::lock(state)
+        .user(peer.uid)
+        .and_then(|u| u.unlocked_ancestor(peer.pid))
+        .is_some()
 }
 
 fn bind_socket(path: &Path, public: bool) -> Result<UnixListener> {

@@ -399,7 +399,7 @@ fn client_refuses_a_daemon_running_as_its_own_user() {
 }
 
 #[test]
-fn a_vault_cannot_be_replaced() {
+fn create_does_not_replace_an_existing_vault() {
     let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
         return;
     };
@@ -476,4 +476,118 @@ fn an_orphaned_unlock_does_not_unlock_its_adopter() {
         unlock_said.contains("directly from the shell"),
         "{unlock_said}"
     );
+}
+
+fn uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+fn export_from_unlocked_shell(f: &Fixture, to: &Path) -> Output {
+    f.unlocked_shell(&format!("\"$SV\" export '{}'", to.display()))
+}
+
+/// Imports from a shell that has not been unlocked.
+fn import(f: &Fixture, file: &Path, passphrase: &str) -> Output {
+    f.outsider(&format!(
+        "printf '%s\\n' '{passphrase}' | \"$SV\" import --passphrase-stdin '{}'",
+        file.display()
+    ))
+}
+
+#[test]
+fn export_needs_an_unlocked_shell() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let out = f.path("export.age");
+    let o = f.outsider(&format!("\"$SV\" export '{}'", out.display()));
+    assert!(!o.status.success());
+    assert!(!out.exists());
+}
+
+#[test]
+fn an_export_moves_to_a_new_machine() {
+    let Some(old) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let out = old.path("export.age");
+    let o = export_from_unlocked_shell(&old, &out);
+    assert!(o.status.success(), "{o:?}");
+    assert!(
+        std::fs::read(&out)
+            .unwrap()
+            .starts_with(b"age-encryption.org/v1\n")
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let Some(new) = Fixture::start_empty() else {
+        return;
+    };
+    let o = import(&new, &out, PASSPHRASE);
+    assert!(o.status.success(), "{o:?}");
+    assert_eq!(stdout(&new.unlocked_shell("cat \"$MNT/config\"")), CONFIG);
+}
+
+#[test]
+fn export_never_overwrites_a_file() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let out = f.path("export.age");
+    std::fs::write(&out, "keep me").unwrap();
+    assert!(!export_from_unlocked_shell(&f, &out).status.success());
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "keep me");
+}
+
+#[test]
+fn import_checks_the_passphrase_before_storing() {
+    let Some(old) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let out = old.path("export.age");
+    assert!(export_from_unlocked_shell(&old, &out).status.success());
+    let Some(new) = Fixture::start_empty() else {
+        return;
+    };
+    assert!(!import(&new, &out, "wrong").status.success());
+    let status = new.command(BIN).arg("status").output().unwrap();
+    assert!(stdout(&status).contains("no vault yet"), "{status:?}");
+}
+
+#[test]
+fn replacing_a_vault_needs_an_unlocked_shell_and_keeps_the_old_one() {
+    const OTHER: &str = "Host x\n  User replaced\n";
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let Some(other) = Fixture::start(&[("config", OTHER)]) else {
+        return;
+    };
+    let replacement = other.path("export.age");
+    assert!(
+        export_from_unlocked_shell(&other, &replacement)
+            .status
+            .success()
+    );
+
+    assert!(!import(&f, &replacement, PASSPHRASE).status.success());
+    assert_eq!(stdout(&f.unlocked_shell("cat \"$MNT/config\"")), CONFIG);
+
+    let unlock = "printf '%s\\n' \"$PW\" | \"$SV\" unlock --passphrase-stdin >/dev/null && ";
+    let mut shell = f.command("sh");
+    shell.env("PW", PASSPHRASE).args([
+        "-c",
+        &format!(
+            "{unlock}printf '%s\\n' \"$PW\" | \"$SV\" import --passphrase-stdin '{}' >/dev/null && cat \"$MNT/config\"",
+            replacement.display()
+        ),
+    ]);
+    let o = shell.output().unwrap();
+    assert_eq!(stdout(&o), OTHER, "{o:?}");
+    let previous = f.path(&format!("state/{}/vault.age.previous", uid()));
+    assert!(previous.exists(), "no backup at {}", previous.display());
 }

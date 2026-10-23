@@ -7,12 +7,13 @@ mod sessions;
 mod users;
 mod vault;
 
-use std::io::BufRead;
+use std::io::{BufRead, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use age::secrecy::SecretString;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
@@ -69,6 +70,16 @@ enum Command {
         #[arg(long, hide = true)]
         work_factor: Option<u8>,
     },
+    /// Write your vault, still encrypted, to FILE (`-` for stdout); needs an unlocked shell
+    Export { file: PathBuf },
+    /// Make an exported vault yours: on a new machine, or replacing your current one
+    /// (which needs an unlocked shell and is kept as a backup)
+    Import {
+        file: PathBuf,
+        /// Read the file's passphrase from the first line of stdin
+        #[arg(long)]
+        passphrase_stdin: bool,
+    },
     /// Give the calling shell and its descendants access to your vault
     Unlock {
         /// Read the passphrase from the first line of stdin
@@ -122,7 +133,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => {
             let status = protocol::call(&cli.socket, &Request::Status)?;
             if status.has_vault {
-                bail!("you already have a vault");
+                bail!("you already have a vault; to replace it, `sshvault import` an exported one");
             }
             let passphrase = if passphrase_stdin {
                 passphrase_from_stdin()?
@@ -142,7 +153,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 eprintln!("sshvault: left out {} (not a regular file)", path.display());
             }
             let vault = base64::engine::general_purpose::STANDARD.encode(sealed);
-            report(protocol::call(&cli.socket, &Request::Create { vault })?)
+            report(protocol::call(
+                &cli.socket,
+                &Request::Import { vault, passphrase },
+            )?)
         }
         Command::Unlock { passphrase_stdin } => {
             let passphrase = if passphrase_stdin {
@@ -153,6 +167,35 @@ fn run(cli: Cli) -> Result<ExitCode> {
             report(protocol::call(
                 &cli.socket,
                 &Request::Unlock { passphrase },
+            )?)
+        }
+        Command::Export { file } => {
+            let reply = protocol::call(&cli.socket, &Request::Export)?;
+            if !reply.ok {
+                bail!("{}", reply.message);
+            }
+            let vault = base64::engine::general_purpose::STANDARD
+                .decode(reply.vault.context("daemon sent no vault")?)
+                .context("daemon sent a malformed vault")?;
+            write_export(&file, &vault)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Import {
+            file,
+            passphrase_stdin,
+        } => {
+            let ciphertext = read_limited(&file)?;
+            vault::check_sealed(&ciphertext)
+                .with_context(|| format!("{} is not an exported vault", file.display()))?;
+            let passphrase = if passphrase_stdin {
+                passphrase_from_stdin()?
+            } else {
+                prompt(&format!("Passphrase for {}: ", file.display()))?
+            };
+            let vault = base64::engine::general_purpose::STANDARD.encode(ciphertext);
+            report(protocol::call(
+                &cli.socket,
+                &Request::Import { vault, passphrase },
             )?)
         }
         Command::Lock { all } => report(protocol::call(&cli.socket, &Request::Lock { all })?),
@@ -194,6 +237,41 @@ fn stub(mount: &Path) -> String {
         mount.join(fs::SELF).join("config").display()
     )
 }
+
+fn write_export(file: &Path, vault: &[u8]) -> Result<()> {
+    if file == Path::new("-") {
+        if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
+            bail!("refusing to write a binary vault to a terminal; redirect stdout or name a file");
+        }
+        let mut out = std::io::stdout().lock();
+        out.write_all(vault)?;
+        return Ok(out.flush()?);
+    }
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(file)
+        .with_context(|| format!("creating {}", file.display()))?;
+    out.write_all(vault)?;
+    out.sync_all()?;
+    Ok(())
+}
+
+fn read_limited(file: &Path) -> Result<Vec<u8>> {
+    let mut data = Vec::new();
+    std::fs::File::open(file)
+        .with_context(|| format!("opening {}", file.display()))?
+        .take(MAX_EXPORT + 1)
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > MAX_EXPORT {
+        bail!("{} is larger than any vault", file.display());
+    }
+    Ok(data)
+}
+
+/// Comfortably above an age file holding the largest vault the daemon accepts.
+const MAX_EXPORT: u64 = 2 * secret::MAX_SECRET as u64;
 
 fn report(reply: Response) -> Result<ExitCode> {
     if !reply.ok {
