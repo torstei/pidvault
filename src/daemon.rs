@@ -2,7 +2,7 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt}
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use age::secrecy::SecretString;
 use anyhow::{Context, Result, bail};
@@ -277,7 +277,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                     format!("vault `{name}` stored")
                 };
                 if let Some((shell, handle)) = shell {
-                    vault.sessions.register(shell, handle);
+                    vault.sessions.register(shell, handle, None);
                     message.push_str(&format!(" and unlocked for shell {shell}"));
                 }
                 Ok(message)
@@ -337,7 +337,9 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
         Request::Unlock {
             vault: name,
             passphrase,
+            for_secs,
         } => {
+            let expires = for_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
             fs::check_vault_name(&name)?;
             let (shell, handle) = calling_shell(&peer)?;
             let path = with_vault(ctx, &peer, &name, |vault| Ok(vault.path.clone()))?;
@@ -361,10 +363,14 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                         vault.hold(Unlocked::new(tree, key, current.wrapped_key));
                     }
                 }
-                vault.sessions.register(shell, handle);
+                vault.sessions.register(shell, handle, expires);
                 let files = vault.open.as_ref().map_or(0, |o| o.tree.file_count());
+                let until = match for_secs {
+                    Some(secs) => format!(" for {}", format_duration(secs)),
+                    None => String::new(),
+                };
                 Ok(format!(
-                    "`{name}` unlocked for shell {shell} ({files} files)"
+                    "`{name}` unlocked for shell {shell}{until} ({files} files)"
                 ))
             })?
         }
@@ -408,6 +414,10 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 .map(|v| VaultStatus {
                     name: v.name.clone(),
                     unlocked_by: v.unlocked_ancestor(peer.pid),
+                    expires_in: v
+                        .unlocked_ancestor(peer.pid)
+                        .and_then(|shell| v.sessions.expires(shell))
+                        .map(|at| at.saturating_duration_since(Instant::now()).as_secs()),
                     sessions: v.sessions.len(),
                     notes: v
                         .open
@@ -425,6 +435,16 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
         vaults,
         data: exported,
     })
+}
+
+pub fn format_duration(secs: u64) -> String {
+    match (secs / 3600, secs / 60 % 60, secs % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, 0) => format!("{m}m"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, 0, _) => format!("{h}h"),
+        (h, m, _) => format!("{h}h {m}m"),
+    }
 }
 
 /// The shell that ran the client, which an unlock is for.

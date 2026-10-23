@@ -14,6 +14,7 @@ use std::io::{BufRead, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use age::secrecy::SecretString;
 use anyhow::{Context, Result, bail};
@@ -94,6 +95,9 @@ enum Command {
     Unlock {
         #[arg(default_value = fs::DEFAULT_VAULT)]
         vault: String,
+        /// Lock again by itself after this long, e.g. 90s, 10m, 1h30m
+        #[arg(long = "for", value_parser = parse_duration)]
+        for_: Option<Duration>,
         /// Read the passphrase from the first line of stdin
         #[arg(long)]
         passphrase_stdin: bool,
@@ -263,6 +267,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Unlock {
             vault,
+            for_,
             passphrase_stdin,
         } => {
             let passphrase = if passphrase_stdin {
@@ -272,7 +277,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             };
             report(protocol::call(
                 &cli.socket,
-                &Request::Unlock { vault, passphrase },
+                &Request::Unlock {
+                    vault,
+                    passphrase,
+                    for_secs: for_.map(|d| d.as_secs()),
+                },
             )?)
         }
         Command::Lock { vault, all } => {
@@ -456,6 +465,39 @@ fn starter_config(dir: &Path, agent_socket: &Path) -> String {
     )
 }
 
+/// A duration like `90s`, `10m` or `1h30m`.
+fn parse_duration(text: &str) -> Result<Duration, String> {
+    let mut total = 0u64;
+    let mut digits = String::new();
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let unit = match c {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            _ => return Err(format!("unknown unit `{c}`; use s, m or h, e.g. 10m")),
+        };
+        let n: u64 = digits
+            .parse()
+            .map_err(|_| format!("a number must come before `{c}`"))?;
+        total = n
+            .checked_mul(unit)
+            .and_then(|s| total.checked_add(s))
+            .ok_or("too long")?;
+        digits.clear();
+    }
+    if !digits.is_empty() {
+        return Err(format!("`{digits}` needs a unit: s, m or h"));
+    }
+    if total == 0 {
+        return Err("the duration must be longer than nothing".into());
+    }
+    Ok(Duration::from_secs(total))
+}
+
 fn print_status(reply: &Response) {
     if reply.vaults.is_empty() {
         println!("no vault yet; create one with `sshvault create`");
@@ -463,8 +505,13 @@ fn print_status(reply: &Response) {
     for vault in &reply.vaults {
         match vault.unlocked_by {
             Some(shell) => println!(
-                "{}: unlocked by shell {shell} ({} of your shells have it unlocked)",
-                vault.name, vault.sessions
+                "{}: unlocked by shell {shell}{} ({} of your shells have it unlocked)",
+                vault.name,
+                vault
+                    .expires_in
+                    .map(|secs| format!(" for another {}", daemon::format_duration(secs)))
+                    .unwrap_or_default(),
+                vault.sessions
             ),
             None => println!(
                 "{}: locked here ({} of your other shells have it unlocked)",
@@ -562,4 +609,28 @@ fn passphrase_from_stdin() -> Result<Zeroizing<String>> {
         bail!("empty passphrase");
     }
     Ok(trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations_parse_with_units() {
+        assert_eq!(parse_duration("90s"), Ok(Duration::from_secs(90)));
+        assert_eq!(parse_duration("10m"), Ok(Duration::from_secs(600)));
+        assert_eq!(parse_duration("1h30m"), Ok(Duration::from_secs(5400)));
+        for bad in ["10", "m", "10x", "0s", "", "99999999999999999999h"] {
+            assert!(parse_duration(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn durations_print_briefly() {
+        assert_eq!(daemon::format_duration(42), "42s");
+        assert_eq!(daemon::format_duration(600), "10m");
+        assert_eq!(daemon::format_duration(612), "10m 12s");
+        assert_eq!(daemon::format_duration(5400), "1h 30m");
+        assert_eq!(daemon::format_duration(7200), "2h");
+    }
 }

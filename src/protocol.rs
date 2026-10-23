@@ -41,9 +41,12 @@ pub enum Request {
         old: Zeroizing<String>,
         new: Zeroizing<String>,
     },
+    /// With `for_secs`, the unlock ends by itself after that many seconds.
     Unlock {
         vault: String,
         passphrase: Zeroizing<String>,
+        #[serde(default)]
+        for_secs: Option<u64>,
     },
     /// Locks `vault`, or every vault, for the caller's shell; with `all`, for every
     /// shell of the caller's user.
@@ -59,6 +62,9 @@ pub struct VaultStatus {
     pub name: String,
     /// The unlocked shell the caller descends from, if any.
     pub unlocked_by: Option<u32>,
+    /// Seconds until the caller's unlock of this vault ends by itself, if it does.
+    #[serde(default)]
+    pub expires_in: Option<u64>,
     /// Shells of the caller's user that have this vault unlocked.
     pub sessions: usize,
     /// Problems worth telling the user about, such as an unreadable agent policy.

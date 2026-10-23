@@ -106,6 +106,9 @@ Inside the vault, refer to files through the mount, e.g.
 `UserKnownHostsFile /run/sshvault/default/known_hosts`. Keep `ControlPath` elsewhere
 (`$XDG_RUNTIME_DIR`): unix sockets cannot live on the mount. A vault holds up to 4 MiB.
 
+`sshvault unlock --for 30m` makes any unlock end by itself; `status` shows how long is
+left. Once no shell has a vault unlocked, its decrypted contents and key leave memory.
+
 Other commands: `sshvault status`, `sshvault lock` (this shell) and `sshvault lock --all`
 (every shell), and `sshvault passwd` to change a passphrase.
 
@@ -134,8 +137,13 @@ without it, and its `.pub`, into the vault. The original is left alone: it has b
 readable by every process you ran, so retire it once the copy works.
 
 A key that deserves more protection than the rest belongs in a vault of its own: its own
-passphrase, unlocked only in the shell that needs it, locked again with
-`sshvault lock signing`, and with its own `agent.toml`.
+passphrase, unlocked only in the shell that needs it, and with its own `agent.toml`.
+Unlock it for just as long as you need it, and it locks again by itself even if you
+forget:
+
+```sh
+sshvault unlock signing --for 10m           # also 90s, 1h30m; unlocking again sets a new limit
+```
 
 ssh tells the agent which connections it opens on behalf of a host you forward your
 agent to. On those, the vault agent offers no key unless the vault's `agent.toml` allows
