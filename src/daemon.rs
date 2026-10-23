@@ -10,9 +10,9 @@ use base64::Engine;
 use fuser::{Config, MountOption, Session, SessionACL};
 use zeroize::Zeroizing;
 
-use crate::fs::{self, Shared, State, Unlocked, VaultFs};
+use crate::fs::{self, Shared, State, Unlocked, VaultFs, VaultState};
 use crate::procs::{self, Pidfd};
-use crate::protocol::{self, Request, Response};
+use crate::protocol::{self, Request, Response, VaultStatus};
 use crate::tree::Tree;
 use crate::users::{self, Account};
 use crate::vault::{self, Key, Stored};
@@ -174,10 +174,8 @@ fn serve(stream: &UnixStream, ctx: &Daemon) {
     let response = handle(stream, ctx).unwrap_or_else(|e| Response {
         ok: false,
         message: format!("{e:#}"),
-        unlocked_by: None,
-        sessions: 0,
-        has_vault: false,
-        vault: None,
+        vaults: Vec::new(),
+        data: None,
     });
     let _ = protocol::write_response(stream, &response);
 }
@@ -192,33 +190,50 @@ fn secret(passphrase: &Zeroizing<String>) -> SecretString {
     SecretString::from(passphrase.to_string())
 }
 
-const NEEDS_UNLOCK: &str = "needs an unlocked shell; run `sshvault unlock` first";
+/// Runs `f` on the caller's vault called `name`, under the state lock.
+fn with_vault<T>(
+    ctx: &Daemon,
+    peer: &procs::PeerCred,
+    name: &str,
+    f: impl FnOnce(&mut VaultState) -> Result<T>,
+) -> Result<T> {
+    let mut state = fs::lock(&ctx.state);
+    let user = state
+        .user_mut(peer.uid)
+        .context("caller has no passwd entry")?;
+    f(user.vault_mut(name)?)
+}
+
+fn needs_unlock(name: &str) -> String {
+    format!("needs `{name}` unlocked in this shell; run `sshvault unlock {name}` first")
+}
 
 // The scrypt steps take about a second, so they run outside the state lock; every
 // write of a vault file happens under it, which keeps saves from interleaving.
 fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
     let peer = procs::peer_cred(stream)?;
     let request = protocol::read_request(stream)?;
-    let vault_path = fs::lock(&ctx.state)
+    // also finds the vaults on disk of a user this daemon has not seen yet
+    fs::lock(&ctx.state)
         .user_mut(peer.uid)
-        .context("caller has no passwd entry")?
-        .vault_path
-        .clone();
+        .context("caller has no passwd entry")?;
 
     let mut exported = None;
     let message = match request {
         Request::Import {
-            vault,
+            vault: name,
+            data,
             passphrase,
             unlock,
         } => {
+            fs::check_vault_name(&name)?;
             let shell = if unlock {
                 Some(calling_shell(&peer)?)
             } else {
                 None
             };
             let ciphertext = base64::engine::general_purpose::STANDARD
-                .decode(vault)
+                .decode(data)
                 .context("vault is not valid base64")?;
             vault::check_sealed(&ciphertext)?;
             let tree = Tree::from_tar(&vault::decrypt(&ciphertext, secret(&passphrase))?)?;
@@ -227,142 +242,162 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 wrapped_key: key.wrap(secret(&passphrase), ctx.wrap_work_factor)?,
                 contents: key.seal_tree(&tree)?,
             };
-            let mut state = fs::lock(&ctx.state);
-            let user = state
-                .user_mut(peer.uid)
-                .context("caller has no passwd entry")?;
-            let replacing = user.has_vault();
-            if replacing && user.unlocked_ancestor(peer.pid).is_none() {
-                bail!("replacing your vault {NEEDS_UNLOCK}");
-            }
-            stored.write(&user.vault_path, true)?;
-            if user.open.is_some() || shell.is_some() {
-                user.hold(Unlocked::new(tree, key, stored.wrapped_key));
-            }
-            let mut message = if replacing {
-                "vault replaced; the previous one is kept as a backup".to_string()
-            } else {
-                "vault stored".to_string()
-            };
-            if let Some((shell, handle)) = shell {
-                user.sessions.register(shell, handle);
-                message.push_str(&format!("; shell {shell} unlocked"));
-            }
-            message
+            with_vault(ctx, &peer, &name, |vault| {
+                let replacing = vault.exists();
+                if replacing && vault.unlocked_ancestor(peer.pid).is_none() {
+                    bail!("replacing `{name}` {}", needs_unlock(&name));
+                }
+                stored.write(&vault.path, true)?;
+                if vault.open.is_some() || shell.is_some() {
+                    vault.hold(Unlocked::new(tree, key, stored.wrapped_key));
+                }
+                let mut message = if replacing {
+                    format!("vault `{name}` replaced; the previous one is kept as a backup")
+                } else {
+                    format!("vault `{name}` stored")
+                };
+                if let Some((shell, handle)) = shell {
+                    vault.sessions.register(shell, handle);
+                    message.push_str(&format!(" and unlocked for shell {shell}"));
+                }
+                Ok(message)
+            })?
         }
-        Request::Export { passphrase } => {
-            let wrapped_key = {
-                let state = fs::lock(&ctx.state);
-                let user = state.user(peer.uid).context("caller has no passwd entry")?;
-                match (&user.open, user.unlocked_ancestor(peer.pid)) {
-                    (Some(open), Some(_)) => open.wrapped_key.clone(),
-                    _ => bail!("export {NEEDS_UNLOCK}"),
+        Request::Export {
+            vault: name,
+            passphrase,
+        } => {
+            let wrapped_key = with_vault(ctx, &peer, &name, |vault| {
+                match (&vault.open, vault.unlocked_ancestor(peer.pid)) {
+                    (Some(open), Some(_)) => Ok(open.wrapped_key.clone()),
+                    _ => bail!("export {}", needs_unlock(&name)),
                 }
-            };
+            })?;
             let key = Key::unwrap(&wrapped_key, secret(&passphrase))?;
-            let archive = {
-                let state = fs::lock(&ctx.state);
-                let open = state.user(peer.uid).and_then(|u| u.open.as_ref());
-                match open {
-                    Some(open) if open.key.same_as(&key) => open.tree.to_tar()?,
-                    _ => bail!("your vault changed during export; try again"),
-                }
-            };
+            let archive = with_vault(ctx, &peer, &name, |vault| match &vault.open {
+                Some(open) if open.key.same_as(&key) => open.tree.to_tar(),
+                _ => bail!("`{name}` changed during export; try again"),
+            })?;
             let sealed = vault::encrypt(&archive, secret(&passphrase), ctx.wrap_work_factor)?;
             exported = Some(base64::engine::general_purpose::STANDARD.encode(sealed));
             String::new()
         }
-        Request::Passwd { old, new } => {
-            let wrapped_key = {
-                let state = fs::lock(&ctx.state);
-                match state.user(peer.uid).and_then(|u| u.open.as_ref()) {
-                    Some(open) => open.wrapped_key.clone(),
-                    None => {
-                        Stored::read(&vault_path)
-                            .context("you have no vault")?
-                            .wrapped_key
-                    }
-                }
-            };
+        Request::Passwd {
+            vault: name,
+            old,
+            new,
+        } => {
+            let wrapped_key = with_vault(ctx, &peer, &name, |vault| match &vault.open {
+                Some(open) => Ok(open.wrapped_key.clone()),
+                None => Ok(Stored::read(&vault.path)
+                    .with_context(|| format!("you have no vault `{name}`"))?
+                    .wrapped_key),
+            })?;
             let key = Key::unwrap(&wrapped_key, secret(&old))?;
             let rewrapped = key.wrap(secret(&new), ctx.wrap_work_factor)?;
-            let mut state = fs::lock(&ctx.state);
-            let user = state
-                .user_mut(peer.uid)
-                .context("caller has no passwd entry")?;
-            match &user.open {
-                Some(open) if open.key.same_as(&key) => user.rewrap(rewrapped)?,
-                Some(_) => bail!("your vault changed meanwhile; try again"),
-                None => {
-                    let stored = Stored::read(&vault_path)?;
-                    if stored.wrapped_key != wrapped_key {
-                        bail!("your vault changed meanwhile; try again");
+            with_vault(ctx, &peer, &name, |vault| {
+                match &vault.open {
+                    Some(open) if open.key.same_as(&key) => vault.rewrap(rewrapped)?,
+                    Some(_) => bail!("`{name}` changed meanwhile; try again"),
+                    None => {
+                        let stored = Stored::read(&vault.path)?;
+                        if stored.wrapped_key != wrapped_key {
+                            bail!("`{name}` changed meanwhile; try again");
+                        }
+                        Stored {
+                            wrapped_key: rewrapped,
+                            contents: stored.contents,
+                        }
+                        .write(&vault.path, false)?;
                     }
-                    Stored {
-                        wrapped_key: rewrapped,
-                        contents: stored.contents,
-                    }
-                    .write(&vault_path, false)?;
                 }
-            }
-            "passphrase changed".to_string()
+                Ok(format!("passphrase of `{name}` changed"))
+            })?
         }
-        Request::Unlock { passphrase } => {
+        Request::Unlock {
+            vault: name,
+            passphrase,
+        } => {
+            fs::check_vault_name(&name)?;
             let (shell, handle) = calling_shell(&peer)?;
-            if !vault_path.exists() {
-                bail!("you have no vault yet; create one with `sshvault create`");
+            let path = with_vault(ctx, &peer, &name, |vault| Ok(vault.path.clone()))?;
+            if !path.exists() {
+                bail!("you have no vault `{name}`; create one with `sshvault create {name}`");
             }
-            let stored = Stored::read(&vault_path)?;
+            let stored = Stored::read(&path)?;
             let key = Key::unwrap(&stored.wrapped_key, secret(&passphrase))?;
+            with_vault(ctx, &peer, &name, |vault| {
+                // a vault already held keeps its unsaved changes; this unlock only proves the passphrase
+                match &vault.open {
+                    Some(open) if open.key.same_as(&key) => {}
+                    Some(_) => bail!("`{name}` changed while unlocking; try again"),
+                    None => {
+                        // read again: a save may have landed while the passphrase was checked
+                        let current = Stored::read(&vault.path)?;
+                        if current.wrapped_key != stored.wrapped_key {
+                            bail!("`{name}` changed while unlocking; try again");
+                        }
+                        let tree = key.open_tree(&current.contents)?;
+                        vault.hold(Unlocked::new(tree, key, current.wrapped_key));
+                    }
+                }
+                vault.sessions.register(shell, handle);
+                let files = vault.open.as_ref().map_or(0, |o| o.tree.file_count());
+                Ok(format!(
+                    "`{name}` unlocked for shell {shell} ({files} files)"
+                ))
+            })?
+        }
+        Request::Lock { vault: name, all } => {
             let mut state = fs::lock(&ctx.state);
             let user = state
                 .user_mut(peer.uid)
                 .context("caller has no passwd entry")?;
-            // a vault already held keeps its unsaved changes; this unlock only proves the passphrase
-            match &user.open {
-                Some(open) if open.key.same_as(&key) => {}
-                Some(_) => bail!("your vault changed while unlocking; try again"),
-                None => {
-                    let tree = key.open_tree(&stored.contents)?;
-                    user.hold(Unlocked::new(tree, key, stored.wrapped_key));
+            let mut locked = Vec::new();
+            for vault in user.vaults_mut() {
+                if name.as_ref().is_some_and(|n| *n != vault.name) {
+                    continue;
+                }
+                if all {
+                    if !vault.sessions.is_empty() {
+                        locked.push(vault.name.clone());
+                    }
+                    vault.sessions.clear();
+                } else if let Some(shell) = vault.unlocked_ancestor(peer.pid) {
+                    vault.sessions.remove(shell);
+                    locked.push(vault.name.clone());
                 }
             }
-            user.sessions.register(shell, handle);
-            let files = user.open.as_ref().map_or(0, |o| o.tree.file_count());
-            format!("shell {shell} unlocked ({files} files)")
-        }
-        Request::Lock { all } => {
-            let mut state = fs::lock(&ctx.state);
-            let message = match state.user_mut(peer.uid) {
-                Some(user) if all => {
-                    user.sessions.clear();
-                    "all your shells locked".to_string()
-                }
-                Some(user) => match user.unlocked_ancestor(peer.pid) {
-                    Some(shell) => {
-                        user.sessions.remove(shell);
-                        format!("shell {shell} locked")
-                    }
-                    None => "this shell was not unlocked".to_string(),
-                },
-                None => "this shell was not unlocked".to_string(),
-            };
             state.prune();
-            message
+            if locked.is_empty() {
+                "nothing was unlocked".to_string()
+            } else {
+                format!("locked {}", locked.join(", "))
+            }
         }
         Request::Status => String::new(),
     };
 
     let mut state = fs::lock(&ctx.state);
     state.prune();
-    let user = state.user(peer.uid);
+    let vaults = state
+        .user(peer.uid)
+        .map(|user| {
+            user.vaults()
+                .filter(|v| v.exists())
+                .map(|v| VaultStatus {
+                    name: v.name.clone(),
+                    unlocked_by: v.unlocked_ancestor(peer.pid),
+                    sessions: v.sessions.len(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Response {
         ok: true,
         message,
-        unlocked_by: user.and_then(|u| u.unlocked_ancestor(peer.pid)),
-        sessions: user.map_or(0, |u| u.sessions.len()),
-        has_vault: vault_path.exists(),
-        vault: exported,
+        vaults,
+        data: exported,
     })
 }
 

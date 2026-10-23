@@ -84,7 +84,7 @@ impl Fixture {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             let o = self.command(BIN).arg("status").output().unwrap();
-            if stdout(&o).contains("(0 ") {
+            if stdout(&o).lines().all(|line| line.contains("(0 ")) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -114,7 +114,7 @@ impl Fixture {
 
     /// The current user's directory inside the mount.
     fn mnt(&self) -> PathBuf {
-        self.path("mnt/self")
+        self.path("mnt/default")
     }
 
     fn command(&self, program: &str) -> Command {
@@ -247,7 +247,7 @@ fn access_ends_when_the_shell_exits() {
     assert!(f.unlocked_shell("true").status.success());
     let o = f.command(BIN).arg("status").output().unwrap();
     assert_eq!(o.status.code(), Some(1));
-    assert!(stdout(&o).starts_with("locked (0 "), "{o:?}");
+    assert!(stdout(&o).starts_with("default: locked here (0 "), "{o:?}");
 }
 
 #[test]
@@ -572,16 +572,122 @@ fn create_does_not_replace_an_existing_vault() {
 }
 
 #[test]
-fn self_is_the_only_entry_and_belongs_to_the_caller() {
+fn the_mount_lists_only_the_callers_vaults_which_belong_to_the_caller() {
     let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
         return;
     };
-    let o = f.outsider("ls -A \"$SSHVAULT_MOUNT\"; stat -c '%A %U' \"$MNT\"");
-    assert_eq!(stdout(&o), format!("self\ndrwx------ {}\n", username()));
-    for name in [username(), "root".to_string()] {
-        let probe = f.outsider(&format!("ls \"$SSHVAULT_MOUNT/{name}\""));
+    let o = f.outsider("ls -A \"$SSHVAULT_MOUNT\"; stat -c '%A %U' \"$MNT\" \"$SSHVAULT_MOUNT\"");
+    assert_eq!(
+        stdout(&o),
+        format!(
+            "default\ndrwx------ {}\ndrwxr-xr-x {}\n",
+            username(),
+            username()
+        )
+    );
+    for name in ["work", "root", ".."] {
+        let probe = f.outsider(&format!("ls \"$SSHVAULT_MOUNT/{name}/config\""));
         assert!(!probe.status.success(), "{name}: {probe:?}");
     }
+}
+
+/// Runs `script` in a fresh `sh` that has unlocked exactly `vaults`, each with `PASSPHRASE`.
+fn shell_with(f: &Fixture, vaults: &[&str], script: &str) -> Output {
+    let unlocks: String = vaults
+        .iter()
+        .map(|v| format!("printf '%s\\n' \"$PW\" | \"$SV\" unlock {v} --passphrase-stdin >/dev/null || exit 99\n"))
+        .collect();
+    f.command("sh")
+        .env("PW", PASSPHRASE)
+        .args(["-c", &format!("{unlocks}{script}")])
+        .output()
+        .unwrap()
+}
+
+fn create_named(f: &Fixture, name: &str, config: &str) {
+    let o = shell_with(
+        f,
+        &[],
+        &format!(
+            "printf '%s\\n' \"$PW\" | \"$SV\" create {name} --no-unlock --passphrase-stdin --work-factor 10 >/dev/null || exit 1\n\
+             printf '%s\\n' \"$PW\" | \"$SV\" unlock {name} --passphrase-stdin >/dev/null && printf '{config}' > \"$SSHVAULT_MOUNT/{name}/config\""
+        ),
+    );
+    assert!(o.status.success(), "{o:?}");
+}
+
+#[test]
+fn a_shell_sees_only_the_vaults_it_unlocked() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    create_named(&f, "work", "Host w\n  User fromwork\n");
+    let read_both = "cat \"$SSHVAULT_MOUNT/default/config\" 2>/dev/null; cat \"$SSHVAULT_MOUNT/work/config\" 2>/dev/null; ls \"$SSHVAULT_MOUNT\"";
+    assert_eq!(
+        stdout(&shell_with(&f, &["work"], read_both)),
+        "Host w\n  User fromwork\ndefault\nwork\n"
+    );
+    assert_eq!(
+        stdout(&shell_with(&f, &["default"], read_both)),
+        format!("{CONFIG}default\nwork\n")
+    );
+    assert_eq!(
+        stdout(&shell_with(&f, &["default", "work"], read_both)),
+        format!("{CONFIG}Host w\n  User fromwork\ndefault\nwork\n")
+    );
+    let write_other = shell_with(
+        &f,
+        &["work"],
+        "echo planted >> \"$SSHVAULT_MOUNT/default/config\"",
+    );
+    assert!(!write_other.status.success());
+}
+
+#[test]
+fn lock_can_lock_one_vault() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    create_named(&f, "work", "Host w\n");
+    let o = shell_with(
+        &f,
+        &["default", "work"],
+        "\"$SV\" lock work >/dev/null; cat \"$SSHVAULT_MOUNT/work/config\" 2>/dev/null; cat \"$MNT/config\"; \"$SV\" status",
+    );
+    let out = stdout(&o);
+    assert!(out.starts_with(CONFIG), "{o:?}");
+    assert!(out.contains("default: unlocked by shell"), "{o:?}");
+    assert!(out.contains("work: locked here"), "{o:?}");
+}
+
+#[test]
+fn ssh_never_adds_keys_to_an_agent_from_an_unlocked_shell() {
+    let Some(f) = Fixture::start(&[("config", "Host x\n  AddKeysToAgent yes\n")]) else {
+        return;
+    };
+    let stub = f.command(BIN).arg("stub").output().unwrap();
+    let path = f.path("ssh_config");
+    std::fs::write(
+        &path,
+        format!("{}\nHost *\n  AddKeysToAgent yes\n", stdout(&stub)),
+    )
+    .unwrap();
+    let query = format!("ssh -G -F {} x | grep '^addkeystoagent '", path.display());
+    assert_eq!(stdout(&f.unlocked_shell(&query)), "addkeystoagent false\n");
+    assert_eq!(stdout(&f.outsider(&query)), "addkeystoagent true\n");
+}
+
+#[test]
+fn a_vault_stored_before_vaults_had_names_becomes_the_default() {
+    let Some(mut f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    f.stop_daemon();
+    let dir = f.path(&format!("state/{}", uid()));
+    std::fs::rename(dir.join("default.sshvault"), dir.join("vault.sshvault")).unwrap();
+    f.spawn_daemon();
+    assert_eq!(stdout(&f.unlocked_shell("cat \"$MNT/config\"")), CONFIG);
+    assert!(!dir.join("vault.sshvault").exists());
 }
 
 #[test]
@@ -755,7 +861,7 @@ fn replacing_a_vault_needs_an_unlocked_shell_and_keeps_the_old_one() {
     ]);
     let o = shell.output().unwrap();
     assert_eq!(stdout(&o), OTHER, "{o:?}");
-    let previous = f.path(&format!("state/{}/vault.sshvault.previous", uid()));
+    let previous = f.path(&format!("state/{}/default.sshvault.previous", uid()));
     assert!(previous.exists(), "no backup at {}", previous.display());
 }
 
@@ -843,5 +949,15 @@ fn create_with_no_unlock_leaves_the_shell_locked() {
         "echo '{PASSPHRASE}' | \"$SV\" create --no-unlock --passphrase-stdin --work-factor 10 >/dev/null && \"$SV\" status"
     ));
     assert_eq!(o.status.code(), Some(1), "{o:?}");
-    assert!(stdout(&o).starts_with("locked"), "{o:?}");
+    assert!(stdout(&o).starts_with("default: locked here"), "{o:?}");
+}
+
+#[test]
+fn status_right_after_a_restart_lists_the_vaults() {
+    let Some(mut f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    f.restart_daemon();
+    let o = f.command(BIN).arg("status").output().unwrap();
+    assert!(stdout(&o).starts_with("default: locked here"), "{o:?}");
 }
