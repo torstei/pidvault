@@ -78,7 +78,7 @@ as alice sh -c '
 '
 check "alice creates a vault" as alice sh -c \
     'echo alice-pass | sshvault create --passphrase-stdin --work-factor 12 --from ~/src && rm ~/src/id_vm'
-ALICE_VAULT="/var/lib/sshvault/$(id -u alice)/vault.age"
+ALICE_VAULT="/var/lib/sshvault/$(id -u alice)/vault.sshvault"
 check "alice's vault is stored by the daemon" equals "$(stat -c '%U %a' "$ALICE_VAULT")" "sshvault 600"
 check "alice cannot read her stored vault" refused as alice cat "$ALICE_VAULT"
 
@@ -107,8 +107,15 @@ check "naming the key explicitly does not help" refused as alice ssh -F /dev/nul
     -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -i /run/sshvault/self/id_vm alice@127.0.0.1 true
 
-check "export needs an unlocked shell" refused as alice sshvault export /tmp/alice-denied.age
-check "alice exports her vault from an unlocked shell" unlocked alice 'sshvault export /tmp/alice-export.age'
+check "alice edits her config from an unlocked shell" unlocked alice \
+    "sed -i 's/LogLevel ERROR/LogLevel QUIET/' /run/sshvault/self/config"
+check "another process of alice cannot write" refused as alice sh -c 'echo planted >> /run/sshvault/self/config'
+check "ssh records a new host key in the vault" unlocked alice \
+    'ssh -o UserKnownHostsFile=/run/sshvault/self/known_hosts -o StrictHostKeyChecking=accept-new vm true && test -s /run/sshvault/self/known_hosts'
+check "export needs an unlocked shell" refused as alice sh -c \
+    'echo alice-pass | sshvault export --passphrase-stdin /tmp/alice-denied.age'
+check "alice exports her vault from an unlocked shell" unlocked alice \
+    'echo alice-pass | sshvault export --passphrase-stdin /tmp/alice-export.age'
 useradd --create-home --shell /bin/bash carol
 install -o carol -m 600 /tmp/alice-export.age /tmp/carol-import.age
 check "carol imports alice's export" as carol sh -c \
@@ -140,7 +147,8 @@ check "daemon logged no warnings" refused sh -c 'journalctl -b -u sshvault | gre
 systemctl restart sshvault
 check "service comes back after a restart" systemctl is-active --quiet sshvault
 check "a restart drops existing unlocks" sh -c 'runuser -u alice -- sshvault status | grep -q "^locked (0 "'
-check "vaults survive a restart" unlocked alice 'grep -q id_vm /run/sshvault/self/config'
+check "vaults and edits survive a restart" unlocked alice \
+    'grep -q "LogLevel QUIET" /run/sshvault/self/config && test -s /run/sshvault/self/known_hosts'
 
 as alice sh -c 'printf "Host plain\n  HostName 192.0.2.1\n" >> ~/.ssh/config'
 check "ssh config parses while the daemon runs" sh -c 'runuser -u alice -- ssh -G plain | grep -q "^hostname 192.0.2.1"'

@@ -40,8 +40,9 @@ behaves as before. It draws the line at the shell you unlocked, and a lot is sti
 to get right:
 
 - **What you do in an unlocked shell.** Anything started there has access, including the
-  AI agent or the `curl | sh` you run in it. Keep a shell for SSH and do the risky things
-  elsewhere.
+  AI agent or the `curl | sh` you run in it — and access includes changing the vault, so
+  whatever it plants there is still there in the next shell you unlock. Keep a shell for
+  SSH and do the risky things elsewhere.
 - **A replaced `ssh`, or strange things in `$PATH`.** Your own processes can write to
   `~/.local/bin`, `~/.bashrc` and the other files your shell trusts. An alias, a function
   or a binary planted there runs inside the next shell you unlock, and sshvault cannot
@@ -58,6 +59,7 @@ sudo systemctl enable --now sshvault        # once per machine
 sshvault create --from ~/ssh-to-migrate     # once: prompts for a passphrase
 sshvault stub                               # once: put its output at the top of ~/.ssh/config
 sshvault unlock                             # in each shell that should have access
+$EDITOR /run/sshvault/self/config           # edit the vault from an unlocked shell
 ```
 
 `sshvault stub` prints an `Include` line that must sit at the top of `~/.ssh/config`. In an
@@ -65,26 +67,32 @@ unlocked shell the vault's entries take precedence; everywhere else the include 
 to nothing and your existing config applies as before. Migrate one host at a time.
 `~/.ssh` itself, `authorized_keys` and inbound SSH are untouched.
 
-Inside the vault, refer to files through the mount, e.g.
-`IdentityFile /run/sshvault/self/id_ed25519`. Keep `ControlPath` elsewhere
-(`$XDG_RUNTIME_DIR`): unix sockets cannot live on the mount. `known_hosts` stays in `~/.ssh`
-for now, since the vault is read-only.
+An unlocked shell, and everything it starts, can change the vault like any directory:
+editors, `sed -i`, `ssh-keygen` and `ssh` itself all work. Changes are saved on `fsync`,
+when a written file is closed, on a rename, and otherwise within a second.
 
-Other commands: `sshvault status`, `sshvault lock`, `sshvault lock --all`.
+Inside the vault, refer to files through the mount, e.g.
+`IdentityFile /run/sshvault/self/id_ed25519` and
+`UserKnownHostsFile /run/sshvault/self/known_hosts`. Keep `ControlPath` elsewhere
+(`$XDG_RUNTIME_DIR`): unix sockets cannot live on the mount. A vault holds up to 4 MiB.
+
+Other commands: `sshvault status`, `sshvault lock`, `sshvault lock --all`, and
+`sshvault passwd` to change the passphrase.
 
 ### Backups and moving to another machine
 
 ```sh
-sshvault export ~/sshvault-backup.age       # from an unlocked shell
-sshvault import ~/sshvault-backup.age       # on the new machine; prompts for its passphrase
+sshvault export ~/sshvault-backup.age       # from an unlocked shell; asks for the passphrase
+sshvault import ~/sshvault-backup.age       # on the new machine; asks for its passphrase
 ```
 
-An export is your vault exactly as stored: a standard, passphrase-encrypted
-[age](https://age-encryption.org) file. Only an unlocked shell may export, so your other
-processes cannot even get a copy to try passphrases against. `import` checks the
-passphrase before storing anything. Replacing an existing vault also needs an unlocked
-shell. The old one is kept as `vault.age.previous`, where an administrator can restore
-it, and shells that are already unlocked see the new contents at once.
+An export is a standard [age](https://age-encryption.org) file encrypted with your
+passphrase, holding a tar archive of the vault (`age -d backup.age | tar -t` lists it).
+Only an unlocked shell may export, so your other processes cannot even get a copy to try
+passphrases against. `import` checks the passphrase before storing anything. Replacing an
+existing vault also needs an unlocked shell. The old one is kept as
+`vault.sshvault.previous`, where an administrator can restore it, and shells that are
+already unlocked see the new contents at once.
 
 ## How it works
 
@@ -94,10 +102,12 @@ it, and shells that are already unlocked see the new contents at once.
   place a socket or file where it lives (its socket is `/run/sshvault.sock`).
 - The client refuses a daemon that runs as your own uid or whose socket directory is not
   root's: such a daemon could be any of your processes, waiting for your passphrase.
-- Vaults are passphrase-encrypted `age` archives in `/var/lib/sshvault/<uid>/`, readable
-  only by the daemon. The client encrypts; the daemon checks that the passphrase opens
-  what it is given before storing it, and replaces an existing vault only for an unlocked
-  shell.
+- Each vault is one file, `/var/lib/sshvault/<uid>/vault.sshvault`, readable only by the
+  daemon. It holds a random 256-bit key K encrypted with your passphrase, and the contents
+  encrypted with K, both in `age` passphrase format; one file, so a save replaces both in
+  a single rename. Unlocking costs one scrypt run on your passphrase; saving costs almost
+  nothing, since K needs no slow key derivation. Because only someone holding K can
+  produce contents that decrypt with it, nobody without K can plant a vault.
 - Every FUSE request carries the caller's pid and uid. Like `/proc/self`, `self` is the
   same path for everyone: each user gets their own directory there (a separate inode, owned
   by that user, mode 0700), and its contents only in a process that is, or descends from,
@@ -106,18 +116,14 @@ it, and shells that are already unlocked see the new contents at once.
   by pidfd, so a reused pid inherits nothing.
 - Kernel caching is off (zero TTLs, direct I/O), so nothing seen by one process is
   served to another from cache.
-- Decrypted data exists only in the daemon's memory, in buffers locked against swap and
-  excluded from core dumps (an unlock fails rather than hold it otherwise), and is wiped
-  when that user's last unlocked shell exits.
+- Decrypted data and K exist only in the daemon's memory, in buffers locked against swap
+  and excluded from core dumps (an unlock fails rather than hold them otherwise), and are
+  wiped when that user's last unlocked shell exits — after any unsaved change is saved.
+  Unlocking another shell while one is open only checks the passphrase and keeps what is
+  in memory.
 - `unlock` registers the shell that ran it, and only if that shell is in the same session:
   a client orphaned with `(sshvault unlock &)` is adopted by `systemd --user`, which must
   not end up unlocking the whole login.
-
-## Not there yet
-
-- The vault is read-only: `known_hosts` cannot be updated in it, and there is no way yet
-  to change its contents or passphrase in place. Making the view writable for unlocked
-  shells is next.
 
 ## Development
 

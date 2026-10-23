@@ -1,137 +1,13 @@
-use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use age::secrecy::SecretString;
 use anyhow::{Context, Result, bail};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::secret::SecretBuf;
-
-pub const ROOT: u64 = 1;
-
-/// The decrypted vault, held only in memory. Inode numbers are index + 1.
-pub struct Tree {
-    nodes: Vec<Node>,
-}
-
-pub struct Node {
-    pub parent: u64,
-    pub kind: Kind,
-}
-
-pub enum Kind {
-    Dir { entries: BTreeMap<OsString, u64> },
-    File { mode: u32, data: SecretBuf },
-}
-
-impl Tree {
-    pub fn empty() -> Tree {
-        Tree {
-            nodes: vec![Node {
-                parent: ROOT,
-                kind: Kind::Dir {
-                    entries: BTreeMap::new(),
-                },
-            }],
-        }
-    }
-
-    pub fn node(&self, ino: u64) -> Option<&Node> {
-        let index = usize::try_from(ino.checked_sub(1)?).ok()?;
-        self.nodes.get(index)
-    }
-
-    pub fn child(&self, parent: u64, name: &OsStr) -> Option<u64> {
-        match &self.node(parent)?.kind {
-            Kind::Dir { entries } => entries.get(name).copied(),
-            Kind::File { .. } => None,
-        }
-    }
-
-    pub fn file_count(&self) -> usize {
-        self.nodes
-            .iter()
-            .filter(|n| matches!(n.kind, Kind::File { .. }))
-            .count()
-    }
-
-    fn insert(&mut self, parent: u64, name: OsString, kind: Kind) -> Result<u64> {
-        let ino = self.nodes.len() as u64 + 1;
-        let Kind::Dir { entries } = &mut self.nodes[(parent - 1) as usize].kind else {
-            bail!("{} is inside a file", name.to_string_lossy());
-        };
-        if entries.contains_key(&name) {
-            bail!("duplicate entry {}", name.to_string_lossy());
-        }
-        entries.insert(name, ino);
-        self.nodes.push(Node { parent, kind });
-        Ok(ino)
-    }
-
-    fn dir_for(&mut self, path: &Path) -> Result<u64> {
-        let mut ino = ROOT;
-        for name in normal_components(path)? {
-            ino = match self.child(ino, &name) {
-                Some(existing)
-                    if matches!(self.node(existing).map(|n| &n.kind), Some(Kind::Dir { .. })) =>
-                {
-                    existing
-                }
-                Some(_) => bail!("{} is both a file and a directory", path.display()),
-                None => self.insert(
-                    ino,
-                    name,
-                    Kind::Dir {
-                        entries: BTreeMap::new(),
-                    },
-                )?,
-            };
-        }
-        Ok(ino)
-    }
-
-    pub fn from_tar(bytes: &[u8]) -> Result<Tree> {
-        let mut tree = Tree::empty();
-        let mut archive = tar::Archive::new(bytes);
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let path = entry.path()?.into_owned();
-            match entry.header().entry_type() {
-                tar::EntryType::Directory => {
-                    tree.dir_for(&path)?;
-                }
-                tar::EntryType::Regular => {
-                    let Some(name) = path.file_name().map(OsStr::to_os_string) else {
-                        bail!("file entry without a name: {}", path.display());
-                    };
-                    let parent = tree.dir_for(path.parent().unwrap_or(Path::new("")))?;
-                    // group/other bits would make ssh refuse private keys
-                    let mode = entry.header().mode()? & 0o700;
-                    let size = usize::try_from(entry.size())?;
-                    let data = SecretBuf::from_reader(&mut entry, size)?;
-                    tree.insert(parent, name, Kind::File { mode, data })?;
-                }
-                other => bail!("unsupported entry type {other:?} for {}", path.display()),
-            }
-        }
-        Ok(tree)
-    }
-}
-
-fn normal_components(path: &Path) -> Result<Vec<OsString>> {
-    let mut names = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(name) => names.push(name.to_os_string()),
-            Component::CurDir => {}
-            _ => bail!("refusing path {} in vault", path.display()),
-        }
-    }
-    Ok(names)
-}
+use crate::tree::Tree;
 
 /// Archives the regular files and directories below `dir`, following symlinks.
 /// Anything else (sockets, fifos, devices) is left out and returned.
@@ -161,7 +37,8 @@ pub fn pack_dir(dir: &Path) -> Result<(Zeroizing<Vec<u8>>, Vec<PathBuf>)> {
     Ok((Zeroizing::new(builder.into_inner()?), skipped))
 }
 
-/// Encrypts `dir` into a vault, returning it with the paths that were left out.
+/// Encrypts `dir` with a passphrase, as an export would be, returning it with the
+/// paths that were left out.
 pub fn seal(
     dir: &Path,
     passphrase: SecretString,
@@ -198,12 +75,6 @@ pub fn decrypt(ciphertext: &[u8], passphrase: SecretString) -> Result<SecretBuf>
     Ok(SecretBuf::from_reader(reader, ciphertext.len())?)
 }
 
-pub fn open(vault: &Path, passphrase: SecretString) -> Result<Tree> {
-    let ciphertext =
-        std::fs::read(vault).with_context(|| format!("reading {}", vault.display()))?;
-    Tree::from_tar(&decrypt(&ciphertext, passphrase)?)
-}
-
 /// Accepts only passphrase-encrypted age files, without being able to decrypt them.
 pub fn check_sealed(ciphertext: &[u8]) -> Result<()> {
     let decryptor = age::Decryptor::new(ciphertext).context("not an age file")?;
@@ -213,35 +84,135 @@ pub fn check_sealed(ciphertext: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Writes `ciphertext` as the vault in one atomic step; a vault already there is kept
-/// as `<vault>.previous`, replacing any older one.
-pub fn store(vault: &Path, ciphertext: &[u8]) -> Result<()> {
-    let dir = vault
-        .parent()
-        .context("vault path has no parent directory")?;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    let staged = sibling(vault, ".new");
-    let _ = std::fs::remove_file(&staged);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&staged)
-        .with_context(|| format!("creating {}", staged.display()))?;
-    file.write_all(ciphertext)?;
-    file.sync_all()?;
-    if vault.exists() {
-        let previous = sibling(vault, ".previous");
-        let _ = std::fs::remove_file(&previous);
-        std::fs::hard_link(vault, &previous)
-            .with_context(|| format!("keeping {}", previous.display()))?;
+const KEY_BYTES: usize = 32;
+
+/// scrypt cost for data encrypted with K. K is 256 random bits, so the cost protects
+/// nothing, and saving must stay cheap.
+const KEY_WORK_FACTOR: u8 = 10;
+
+/// K, the random key the vault contents are encrypted with, held as the 64 hex digits
+/// that serve as its age passphrase (so `age -d` can use it as well).
+pub struct Key(SecretBuf);
+
+impl Key {
+    pub fn generate() -> Result<Key> {
+        let mut raw = [0u8; KEY_BYTES];
+        getrandom::fill(&mut raw).map_err(|e| anyhow::anyhow!("no randomness: {e}"))?;
+        let mut hex = SecretBuf::with_capacity(2 * KEY_BYTES)?;
+        for byte in raw {
+            hex.extend_from_slice(&[HEX[(byte >> 4) as usize], HEX[(byte & 0xf) as usize]])?;
+        }
+        raw.zeroize();
+        Ok(Key(hex))
     }
-    std::fs::rename(&staged, vault).with_context(|| format!("replacing {}", vault.display()))?;
-    std::fs::File::open(dir)?.sync_all()?;
-    Ok(())
+
+    fn passphrase(&self) -> SecretString {
+        // the bytes are ASCII hex digits, checked in `unwrap`
+        SecretString::from(String::from_utf8_lossy(&self.0).into_owned())
+    }
+
+    /// K encrypted with the user's passphrase.
+    pub fn wrap(&self, passphrase: SecretString, work_factor: Option<u8>) -> Result<Vec<u8>> {
+        encrypt(&self.0, passphrase, work_factor)
+    }
+
+    pub fn unwrap(wrapped: &[u8], passphrase: SecretString) -> Result<Key> {
+        let hex = decrypt(wrapped, passphrase)?;
+        if hex.len() != 2 * KEY_BYTES || !hex.iter().all(|b| HEX.contains(b)) {
+            bail!("vault key is malformed");
+        }
+        Ok(Key(hex))
+    }
+
+    pub fn seal_tree(&self, tree: &Tree) -> Result<Vec<u8>> {
+        encrypt(&tree.to_tar()?, self.passphrase(), Some(KEY_WORK_FACTOR))
+    }
+
+    pub fn open_tree(&self, contents: &[u8]) -> Result<Tree> {
+        Tree::from_tar(&decrypt(contents, self.passphrase())?)
+    }
+
+    pub fn same_as(&self, other: &Key) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(other.0.iter())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+    }
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+const MAGIC: &[u8] = b"sshvault-v1\n";
+
+/// What is stored for each user: K wrapped with the passphrase, and the contents
+/// encrypted with K. One file, so a save replaces both in a single rename.
+pub struct Stored {
+    pub wrapped_key: Vec<u8>,
+    pub contents: Vec<u8>,
+}
+
+impl Stored {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out =
+            Vec::with_capacity(MAGIC.len() + 4 + self.wrapped_key.len() + self.contents.len());
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&(self.wrapped_key.len() as u32).to_be_bytes());
+        out.extend_from_slice(&self.wrapped_key);
+        out.extend_from_slice(&self.contents);
+        out
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Stored> {
+        let rest = bytes.strip_prefix(MAGIC).context("not an sshvault vault")?;
+        let (len, rest) = rest.split_first_chunk::<4>().context("truncated vault")?;
+        let len = u32::from_be_bytes(*len) as usize;
+        if rest.len() < len {
+            bail!("truncated vault");
+        }
+        let (wrapped_key, contents) = rest.split_at(len);
+        Ok(Stored {
+            wrapped_key: wrapped_key.to_vec(),
+            contents: contents.to_vec(),
+        })
+    }
+
+    pub fn read(path: &Path) -> Result<Stored> {
+        Stored::parse(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+    }
+
+    /// Writes in one atomic step. With `keep_previous`, the file being replaced stays
+    /// as `<path>.previous`, replacing any older one.
+    pub fn write(&self, path: &Path, keep_previous: bool) -> Result<()> {
+        let dir = path
+            .parent()
+            .context("vault path has no parent directory")?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        let staged = sibling(path, ".new");
+        let _ = std::fs::remove_file(&staged);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&staged)
+            .with_context(|| format!("creating {}", staged.display()))?;
+        file.write_all(&self.to_bytes())?;
+        file.sync_all()?;
+        if keep_previous && path.exists() {
+            let previous = sibling(path, ".previous");
+            let _ = std::fs::remove_file(&previous);
+            std::fs::hard_link(path, &previous)
+                .with_context(|| format!("keeping {}", previous.display()))?;
+        }
+        std::fs::rename(&staged, path).with_context(|| format!("replacing {}", path.display()))?;
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    }
 }
 
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
@@ -253,6 +224,8 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree::{ROOT, read_file};
+    use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt;
 
     fn secret(s: &str) -> SecretString {
@@ -269,63 +242,86 @@ mod tests {
         tmp
     }
 
-    fn read(tree: &Tree, path: &[&str]) -> Option<(u32, Vec<u8>)> {
-        let mut ino = ROOT;
-        for name in path {
-            ino = tree.child(ino, OsStr::new(name))?;
-        }
-        match &tree.node(ino)?.kind {
-            Kind::File { mode, data } => Some((*mode, data.to_vec())),
-            Kind::Dir { .. } => None,
-        }
+    fn stored(passphrase: &str) -> (Key, Stored) {
+        let key = Key::generate().unwrap();
+        let mut tree = Tree::empty();
+        let ino = tree.create_file(ROOT, OsStr::new("config"), 0o600).unwrap();
+        tree.write(ino, 0, b"Host x\n").unwrap();
+        let stored = Stored {
+            wrapped_key: key.wrap(secret(passphrase), Some(4)).unwrap(),
+            contents: key.seal_tree(&tree).unwrap(),
+        };
+        (key, stored)
     }
 
     #[test]
-    fn round_trip_keeps_tree_and_strips_group_other_bits() {
+    fn sealed_directory_strips_group_other_bits() {
         let src = sample_dir();
-        let out = tempfile::tempdir().unwrap();
-        let vault = out.path().join("v/vault.age");
         let (sealed, skipped) = seal(src.path(), secret("pw"), Some(4)).unwrap();
         assert!(skipped.is_empty());
         check_sealed(&sealed).unwrap();
-        store(&vault, &sealed).unwrap();
-
-        let tree = open(&vault, secret("pw")).unwrap();
+        let tree = Tree::from_tar(&decrypt(&sealed, secret("pw")).unwrap()).unwrap();
         assert_eq!(tree.file_count(), 2);
-        assert_eq!(read(&tree, &["config"]).unwrap().1, b"Host x\n");
         assert_eq!(
-            read(&tree, &["keys", "id_test"]).unwrap(),
+            read_file(&tree, &["keys", "id_test"]).unwrap(),
             (0o600, b"PRIVATE".to_vec())
         );
+    }
+
+    #[test]
+    fn the_passphrase_opens_the_key_and_the_key_opens_the_contents() {
+        let (key, stored) = stored("pw");
+        let back = Stored::parse(&stored.to_bytes()).unwrap();
+        let unwrapped = Key::unwrap(&back.wrapped_key, secret("pw")).unwrap();
+        assert!(unwrapped.same_as(&key));
+        let tree = unwrapped.open_tree(&back.contents).unwrap();
+        assert_eq!(read_file(&tree, &["config"]).unwrap().1, b"Host x\n");
+        assert!(Key::unwrap(&back.wrapped_key, secret("other")).is_err());
+    }
+
+    #[test]
+    fn contents_cannot_be_opened_with_the_passphrase_itself() {
+        let (_, stored) = stored("pw");
+        assert!(decrypt(&stored.contents, secret("pw")).is_err());
+    }
+
+    #[test]
+    fn keys_are_random() {
+        assert!(!Key::generate().unwrap().same_as(&Key::generate().unwrap()));
+    }
+
+    #[test]
+    fn write_replaces_atomically_and_keeps_the_previous_when_asked() {
+        let out = tempfile::tempdir().unwrap();
+        let path = out.path().join("v/vault.sshvault");
+        let (_, first) = stored("one");
+        let (_, second) = stored("two");
+        first.write(&path, true).unwrap();
+        second.write(&path, true).unwrap();
+        let current = Stored::read(&path).unwrap();
+        assert!(Key::unwrap(&current.wrapped_key, secret("two")).is_ok());
+        let previous = Stored::read(&out.path().join("v/vault.sshvault.previous")).unwrap();
+        assert!(Key::unwrap(&previous.wrapped_key, secret("one")).is_ok());
+        assert!(!out.path().join("v/vault.sshvault.new").exists());
         assert_eq!(
-            std::fs::metadata(&vault).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+
+        first.write(&path, false).unwrap();
+        let previous = Stored::read(&out.path().join("v/vault.sshvault.previous")).unwrap();
+        assert!(
+            Key::unwrap(&previous.wrapped_key, secret("one")).is_ok(),
+            "previous unchanged"
         );
     }
 
     #[test]
-    fn wrong_passphrase_fails() {
-        let src = sample_dir();
-        let out = tempfile::tempdir().unwrap();
-        let vault = out.path().join("vault.age");
-        store(&vault, &seal(src.path(), secret("pw"), Some(4)).unwrap().0).unwrap();
-        assert!(open(&vault, secret("other")).is_err());
-    }
-
-    #[test]
-    fn store_replaces_atomically_and_keeps_the_previous_vault() {
-        let src = sample_dir();
-        let out = tempfile::tempdir().unwrap();
-        let vault = out.path().join("vault.age");
-        let first = seal(src.path(), secret("one"), Some(4)).unwrap().0;
-        let second = seal(src.path(), secret("two"), Some(4)).unwrap().0;
-        store(&vault, &first).unwrap();
-        store(&vault, &second).unwrap();
-        assert!(open(&vault, secret("two")).is_ok());
-        assert!(open(&out.path().join("vault.age.previous"), secret("one")).is_ok());
-        assert!(!out.path().join("vault.age.new").exists());
-        let mode = std::fs::metadata(&vault).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+    fn truncated_or_foreign_files_are_refused() {
+        let (_, stored) = stored("pw");
+        let bytes = stored.to_bytes();
+        assert!(Stored::parse(&bytes[..MAGIC.len() + 2]).is_err());
+        assert!(Stored::parse(b"age-encryption.org/v1\n").is_err());
     }
 
     #[test]
@@ -333,14 +329,8 @@ mod tests {
         let src = sample_dir();
         let _listener =
             std::os::unix::net::UnixListener::bind(src.path().join("control.sock")).unwrap();
-        let (sealed, skipped) = seal(src.path(), secret("pw"), Some(4)).unwrap();
+        let (_, skipped) = seal(src.path(), secret("pw"), Some(4)).unwrap();
         assert_eq!(skipped, vec![PathBuf::from("control.sock")]);
-        assert_eq!(
-            Tree::from_tar(&decrypt(&sealed, secret("pw")).unwrap())
-                .unwrap()
-                .file_count(),
-            2
-        );
     }
 
     #[test]
@@ -354,19 +344,5 @@ mod tests {
         w.write_all(b"x").unwrap();
         w.finish().unwrap();
         assert!(check_sealed(&out).is_err());
-    }
-
-    #[test]
-    fn rejects_parent_traversal() {
-        let mut header = tar::Header::new_gnu();
-        header.set_size(1);
-        header.set_mode(0o600);
-        header.set_entry_type(tar::EntryType::Regular);
-        let name = b"../escape";
-        header.as_old_mut().name[..name.len()].copy_from_slice(name);
-        header.set_cksum();
-        let mut builder = tar::Builder::new(Vec::new());
-        builder.append(&header, &b"x"[..]).unwrap();
-        assert!(Tree::from_tar(&builder.into_inner().unwrap()).is_err());
     }
 }
