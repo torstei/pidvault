@@ -25,11 +25,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # downloaded packages are cached so a slow mirror only costs the run that fills it
+      - name: Restore downloaded packages
+        id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-test-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: apt-test-${{ runner.os }}-
       - name: Install FUSE and sshd for the end-to-end tests
-        timeout-minutes: 5
+        timeout-minutes: 15
         run: |
+          mkdir -p ~/apt-archives/partial
           sudo apt-get $APT_OPTIONS update
-          sudo apt-get $APT_OPTIONS install -y --no-install-recommends fuse3 openssh-server
+          sudo apt-get $APT_OPTIONS -o Dir::Cache::archives="$HOME/apt-archives" \
+            install -y --no-install-recommends fuse3 openssh-server
+          sudo chown -R "$USER" ~/apt-archives
+      - name: Keep downloaded packages
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-test-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -56,12 +73,28 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm-runner.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      # downloaded packages are cached so a slow mirror only costs the run that fills it
+      - name: Restore downloaded packages
+        id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-vm-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: apt-vm-${{ runner.os }}-
       - name: Install QEMU and image tooling
-        timeout-minutes: 5
+        timeout-minutes: 15
         run: |
+          mkdir -p ~/apt-archives/partial
           sudo apt-get $APT_OPTIONS update
-          sudo apt-get $APT_OPTIONS install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils genisoimage gpgv ubuntu-cloudimage-keyring
+          sudo apt-get $APT_OPTIONS -o Dir::Cache::archives="$HOME/apt-archives" \
+            install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage gpgv ubuntu-cloudimage-keyring
+          sudo chown -R "$USER" ~/apt-archives
+      - name: Keep downloaded packages
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-vm-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal && rustup default stable
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
