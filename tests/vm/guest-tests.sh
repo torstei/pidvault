@@ -41,7 +41,17 @@ daemon_pid() { systemctl show --property MainPID --value sshvault; }
 
 # --- installation -----------------------------------------------------------
 
-check "package installs" apt-get install -y -q "$DEB"
+REPO=$(dirname "$DEB")/repo
+only_sshvault=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/sshvault.list -o Dir::Etc::sourceparts=-)
+use_repo_signed_by() {
+    echo "deb [signed-by=$1] file:$REPO stable main" > /etc/apt/sources.list.d/sshvault.list
+}
+use_repo_signed_by "$(dirname "$DEB")/other.asc"
+check "apt refuses the repository under another signing key" refused apt-get update -q "${only_sshvault[@]}"
+install -m 644 "$REPO/sshvault.asc" /etc/apt/keyrings/sshvault.asc
+use_repo_signed_by /etc/apt/keyrings/sshvault.asc
+check "apt accepts the signed repository" apt-get update -q "${only_sshvault[@]}"
+check "package installs from the repository" apt-get install -y -q sshvault
 check "service is active" systemctl is-active --quiet sshvault
 check "daemon runs as the sshvault account" equals "$(ps -o user= -p "$(daemon_pid)")" sshvault
 check "sshvault is a system account without a shell" \
