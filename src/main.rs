@@ -143,6 +143,19 @@ enum Command {
         #[arg(long)]
         passphrase_stdin: bool,
     },
+    /// Copy a private key into a vault, removing its passphrase on the way; the vault
+    /// must be unlocked in the calling shell
+    AddKey {
+        file: PathBuf,
+        #[arg(long, default_value = fs::DEFAULT_VAULT)]
+        vault: String,
+        /// Name in the vault [default: the file's name]
+        #[arg(long)]
+        name: Option<String>,
+        /// Read the key's passphrase from the first line of stdin
+        #[arg(long)]
+        passphrase_stdin: bool,
+    },
     /// Print the lines to put at the top of ~/.ssh/config
     Stub,
 }
@@ -324,6 +337,69 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 },
             )?)
         }
+        Command::AddKey {
+            file,
+            vault,
+            name,
+            passphrase_stdin,
+        } => {
+            fs::check_vault_name(&vault)?;
+            let status = protocol::call(&cli.socket, &Request::Status)?;
+            if !status
+                .vault(&vault)
+                .is_some_and(|v| v.unlocked_by.is_some())
+            {
+                bail!(
+                    "`{vault}` is not unlocked in this shell; run `sshvault unlock {vault}` first"
+                );
+            }
+            let name = match name {
+                Some(name) => PathBuf::from(name),
+                None => PathBuf::from(file.file_name().context("the key file has no name")?),
+            };
+            if name.is_absolute()
+                || name
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                bail!("--name must be a plain path inside the vault");
+            }
+            let private_path = cli.mount.join(&vault).join(&name);
+            let public_path = private_path.with_file_name(format!(
+                "{}.pub",
+                private_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ));
+            for path in [&private_path, &public_path] {
+                if path.exists() {
+                    bail!("{} already exists", path.display());
+                }
+            }
+            let data = read_limited(&file)?;
+            let key = keys::importable(&data, || {
+                if passphrase_stdin {
+                    passphrase_from_stdin()
+                } else {
+                    prompt(&format!("Passphrase for {}: ", file.display()))
+                }
+            })?;
+            create_new(&private_path, key.private.as_bytes())?;
+            create_new(&public_path, format!("{}\n", key.public).as_bytes())?;
+            println!(
+                "added {} to `{vault}` as {} ({})",
+                file.display(),
+                name.display(),
+                key.fingerprint
+            );
+            println!("use it with:  IdentityFile {}", private_path.display());
+            println!(
+                "{} itself is unchanged; it has been readable by every process you ran, so retire it once the copy works",
+                file.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Stub => {
             println!("{}", stub(&cli.mount, &cli.agent_socket)?);
             Ok(ExitCode::SUCCESS)
@@ -384,6 +460,18 @@ fn write_export(file: &Path, vault: &[u8]) -> Result<()> {
         .open(file)
         .with_context(|| format!("creating {}", file.display()))?;
     out.write_all(vault)?;
+    out.sync_all()?;
+    Ok(())
+}
+
+fn create_new(path: &Path, data: &[u8]) -> Result<()> {
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    out.write_all(data)?;
     out.sync_all()?;
     Ok(())
 }

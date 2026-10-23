@@ -1084,3 +1084,88 @@ fn forwarded_connections_get_only_keys_the_policy_allows() {
         "{allowed:?}"
     );
 }
+
+fn keygen_at(path: &Path, passphrase: &str, comment: &str) {
+    assert!(
+        Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", passphrase, "-C", comment, "-f"])
+            .arg(path)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn add_key_brings_a_protected_key_in_without_its_passphrase() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let original = f.path("id_old");
+    keygen_at(&original, "old secret", "old-key");
+    let before = std::fs::read(&original).unwrap();
+    let o = f.unlocked_shell(&format!(
+        r#"echo 'old secret' | "$SV" add-key --passphrase-stdin --name id_github '{}' >/dev/null || exit 1
+           stat -c %a "$MNT/id_github"
+           cut -d' ' -f3 "$MNT/id_github.pub"
+           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l | grep -c old-key"#,
+        original.display()
+    ));
+    assert_eq!(stdout(&o), "200\nold-key\n1\n", "{o:?}");
+    assert_eq!(
+        std::fs::read(&original).unwrap(),
+        before,
+        "the original must stay as it was"
+    );
+}
+
+#[test]
+fn add_key_refuses_a_locked_vault_a_wrong_passphrase_and_overwriting() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let original = f.path("id_old");
+    keygen_at(&original, "old secret", "old-key");
+    let locked = f.outsider(&format!(
+        "echo 'old secret' | \"$SV\" add-key --passphrase-stdin '{}'",
+        original.display()
+    ));
+    assert!(
+        stderr_of(&locked).contains("not unlocked in this shell"),
+        "{locked:?}"
+    );
+
+    let o = f.unlocked_shell(&format!(
+        r#"echo wrong | "$SV" add-key --passphrase-stdin '{0}' 2>&1 | grep -c 'wrong passphrase'
+           ls "$MNT"
+           echo 'old secret' | "$SV" add-key --passphrase-stdin '{0}' >/dev/null
+           echo 'old secret' | "$SV" add-key --passphrase-stdin '{0}' 2>&1 | grep -c 'already exists'"#,
+        original.display()
+    ));
+    assert_eq!(stdout(&o), "1\nconfig\n1\n", "{o:?}");
+}
+
+#[test]
+fn add_key_takes_an_unprotected_key_into_a_named_vault() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    create_named(&f, "signing", "");
+    let original = f.path("id_sign");
+    keygen_at(&original, "", "sign-key");
+    let o = shell_with(
+        &f,
+        &["signing"],
+        &format!(
+            r#""$SV" add-key --vault signing '{}' </dev/null >/dev/null || exit 1
+               ls "$SSHVAULT_MOUNT/signing"
+               SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l | grep -c sign-key"#,
+            original.display()
+        ),
+    );
+    assert_eq!(stdout(&o), "config\nid_sign\nid_sign.pub\n1\n", "{o:?}");
+}
+
+fn stderr_of(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}

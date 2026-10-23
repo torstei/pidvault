@@ -125,6 +125,9 @@ check "alice edits her config from an unlocked shell" unlocked alice \
 check "another process of alice cannot write" refused as alice sh -c 'echo planted >> /run/sshvault/default/config'
 check "ssh records a new host key in the vault" unlocked alice \
     'ssh -o UserKnownHostsFile=/run/sshvault/default/known_hosts -o StrictHostKeyChecking=accept-new vm true && test -s /run/sshvault/default/known_hosts'
+as alice ssh-keygen -q -t ed25519 -N 'key secret' -C old-github -f /tmp/alice-old-key
+check "add-key brings a protected key in, protected and offered by the agent" unlocked alice \
+    "echo 'key secret' | sshvault add-key --passphrase-stdin --name id_github /tmp/alice-old-key >/dev/null && ! cat /run/sshvault/default/id_github 2>/dev/null && SSH_AUTH_SOCK=/run/sshvault-agent.sock ssh-add -l | grep -q old-github"
 check "export needs an unlocked shell" refused as alice sh -c \
     'echo alice-pass | sshvault export --passphrase-stdin /tmp/alice-denied.age'
 check "alice exports her vault from an unlocked shell" unlocked alice \
