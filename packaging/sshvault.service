@@ -1,34 +1,54 @@
 [Unit]
 Description=Per-shell access to encrypted SSH configuration
-After=local-fs.target systemd-sysusers.service
+Requires=sshvault.socket sshvault-mount.socket
+After=sshvault.socket sshvault-mount.socket local-fs.target systemd-sysusers.service
 
 [Service]
 Type=exec
-# starts as root to mount for every user, then drops to the sshvault account itself
-# a mount left without its daemon makes the ssh_config Include fail for every host
-ExecStartPre=-/usr/bin/umount --lazy /run/sshvault
+User=sshvault
+Group=sshvault
+# Never root: the mount, the one step that needs it, is made by sshvault-mount.service,
+# which hands over the FUSE connection and unmounts once this daemon is gone.
 ExecStart=/usr/bin/sshvault daemon
-ExecStopPost=-/usr/bin/umount --lazy /run/sshvault
-ExecStopPost=-/usr/bin/rm -f /run/sshvault.sock /run/sshvault-agent.sock
 Restart=on-failure
 
-# not RuntimeDirectory=: systemd prepares it before every Exec*, and a dead FUSE mount
-# there (ENOTCONN) would stop even the umount below from running
-# not StateDirectory=: without User= systemd would chown it back to root on every start
+StateDirectory=sshvault
+StateDirectoryMode=0700
+UMask=0077
 # decrypted vaults are held in locked memory, up to 4 MiB per user
 LimitMEMLOCK=64M
+LimitCORE=0
 
-# Nothing that gives the service its own mount namespace (PrivateTmp, ProtectSystem,
-# ProtectHome, ReadWritePaths, ProtectKernel*, ...): the mount would be invisible to users.
-# ProtectProc= must stay at its default: callers are identified through /proc.
+CapabilityBoundingSet=
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateIPC=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
-RestrictNamespaces=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+ProcSubset=pid
+SystemCallErrorNumber=EPERM
+# Not PrivateUsers=: callers are identified by uid, which it would remap. Not
+# ProtectProc=: whether a caller descends from an unlocked shell is read from other
+# users' /proc entries.
 
 [Install]
 WantedBy=multi-user.target

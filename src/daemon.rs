@@ -1,4 +1,4 @@
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -14,8 +14,8 @@ use crate::agent;
 use crate::fs::{self, Shared, State, Unlocked, VaultFs, VaultState};
 use crate::procs::{self, Pidfd};
 use crate::protocol::{self, Request, Response, VaultStatus};
+use crate::systemd;
 use crate::tree::Tree;
-use crate::users::{self, Account};
 use crate::vault::{self, Key, Stored};
 
 const PRUNE_INTERVAL: Duration = Duration::from_millis(250);
@@ -24,69 +24,137 @@ pub struct Options {
     pub socket: PathBuf,
     pub agent_socket: PathBuf,
     pub mount: PathBuf,
+    /// Where the mount helper hands over the FUSE connection, when run by systemd.
+    pub mount_socket: PathBuf,
     pub state_dir: PathBuf,
-    /// `None` runs as the invoking user, without separation from that user's processes.
-    pub run_as: Option<String>,
+    /// Mount and bind as the invoking user, for tests. Otherwise systemd hands over the
+    /// mount and the sockets, and the daemon never holds any privilege.
+    pub unprivileged: bool,
     pub wrap_work_factor: Option<u8>,
+}
+
+/// The one step that needs root, in a unit of its own: a sandboxed unit's mounts stay in
+/// its private namespace, invisible to users. For each daemon that connects (the socket is
+/// reachable only by the daemon's group) it mounts the view and passes back the FUSE
+/// connection, then unmounts once that daemon is gone, for whatever reason: a mount left
+/// without its daemon makes the ssh_config Include fail for every host.
+pub fn mount_helper(mount: &Path) -> Result<()> {
+    let (_, socket) = systemd::listen_fds()?
+        .into_iter()
+        .next()
+        .context("systemd passed no socket")?;
+    for stream in UnixListener::from(socket).incoming() {
+        let stream = stream?;
+        match mount_fuse(mount) {
+            Ok(fuse) => systemd::send_fd(&stream, &fuse)?,
+            Err(e) => {
+                eprintln!("sshvault: {e:#}");
+                continue;
+            }
+        }
+        let mut byte = [0u8; 1];
+        let _ = std::io::Read::read(&mut &stream, &mut byte);
+        unmount(mount);
+    }
+    Ok(())
+}
+
+fn unmount(mount: &Path) {
+    if let Ok(path) = std::ffi::CString::new(mount.as_os_str().as_encoded_bytes()) {
+        unsafe { libc::umount2(path.as_ptr(), libc::MNT_DETACH) };
+    }
+}
+
+fn mount_fuse(mount: &Path) -> Result<std::os::fd::OwnedFd> {
+    unmount(mount);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(mount)
+        .with_context(|| format!("creating {}", mount.display()))?;
+    let fuse = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/fuse")
+        .context("opening /dev/fuse")?;
+    let fuse = std::os::fd::OwnedFd::from(fuse);
+    let path = std::ffi::CString::new(mount.as_os_str().as_encoded_bytes())?;
+    let data = std::ffi::CString::new(format!(
+        "fd={},rootmode=40755,user_id=0,group_id=0,allow_other,default_permissions",
+        std::os::fd::AsRawFd::as_raw_fd(&fuse)
+    ))?;
+    let rc = unsafe {
+        libc::mount(
+            c"sshvault".as_ptr(),
+            path.as_ptr(),
+            c"fuse.sshvault".as_ptr(),
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            data.as_ptr().cast(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("mounting {}", mount.display()));
+    }
+    Ok(fuse)
 }
 
 pub fn run(options: &Options) -> Result<()> {
     // blocked before any thread exists so that only sigtimedwait below receives them
     let signals = block_termination_signals()?;
-
-    let privileged = match &options.run_as {
-        Some(name) => {
-            if !users::is_root() {
-                bail!(
-                    "the daemon must start as root to mount for all users, then drops to {name}; \
-                     use the systemd unit, or --unprivileged for testing"
-                );
-            }
-            Some(users::by_name(name).with_context(|| format!("no such user {name}"))?)
-        }
-        None => None,
-    };
-    let (owner_uid, owner_gid) = match &privileged {
-        Some(account) => (account.uid, account.gid),
-        None => unsafe { (libc::getuid(), libc::getgid()) },
-    };
-
-    prepare_dirs(options, privileged.as_ref())?;
-    let listener = bind_socket(&options.socket, privileged.is_some())?;
-    let agent_listener = bind_socket(&options.agent_socket, privileged.is_some())?;
-
+    let (owner_uid, owner_gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let state: Shared = Arc::new(Mutex::new(State::new(options.state_dir.clone())));
-    let mut config = Config::default();
-    config.mount_options = vec![
-        MountOption::NoSuid,
-        MountOption::NoDev,
-        MountOption::NoExec,
-        MountOption::DefaultPermissions,
-        MountOption::FSName("sshvault".into()),
-        MountOption::Subtype("sshvault".into()),
-    ];
-    // a root mount serves every user; VaultFs itself confines each to their own tree
-    config.acl = if privileged.is_some() {
-        SessionACL::All
-    } else {
-        SessionACL::Owner
-    };
-    let session = Session::new(
-        VaultFs::new(state.clone(), owner_uid, owner_gid),
-        &options.mount,
-        &config,
-    )
-    .with_context(|| format!("mounting {}", options.mount.display()))?;
+    let fs = VaultFs::new(state.clone(), owner_uid, owner_gid);
 
-    if let Some(account) = &privileged {
-        users::drop_privileges(account)?;
-    }
-    // as the owner: root keeps no CAP_FOWNER to change modes on what it handed over
-    std::fs::set_permissions(&options.state_dir, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("restricting {}", options.state_dir.display()))?;
-    for warning in procs::harden()? {
-        eprintln!("sshvault: warning: {warning}");
-    }
+    let mut mount_connection = None;
+    let (session, listener, agent_listener) = if options.unprivileged {
+        for dir in [&options.socket, &options.agent_socket]
+            .iter()
+            .filter_map(|p| p.parent())
+            .chain([options.mount.as_path(), options.state_dir.as_path()])
+        {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .with_context(|| format!("creating {}", dir.display()))?;
+        }
+        let listener = bind_socket(&options.socket)?;
+        let agent_listener = bind_socket(&options.agent_socket)?;
+        let mut config = Config::default();
+        config.mount_options = vec![
+            MountOption::NoSuid,
+            MountOption::NoDev,
+            MountOption::NoExec,
+            MountOption::DefaultPermissions,
+            MountOption::FSName("sshvault".into()),
+            MountOption::Subtype("sshvault".into()),
+        ];
+        let session = Session::new(fs, &options.mount, &config)
+            .with_context(|| format!("mounting {}", options.mount.display()))?;
+        (session, listener, agent_listener)
+    } else {
+        let (listener, agent_listener) = sockets_from_systemd(options)?;
+        let helper = UnixStream::connect(&options.mount_socket).with_context(|| {
+            format!(
+                "reaching the mount helper at {}",
+                options.mount_socket.display()
+            )
+        })?;
+        let fuse = systemd::recv_fd(&helper).context("receiving the FUSE connection")?;
+        // held open while serving: the helper unmounts once it closes
+        mount_connection = Some(helper);
+        // a mount made for every user; VaultFs itself confines each to their own vaults
+        let session = Session::from_fd(fs, fuse, SessionACL::All, Config::default())
+            .context("taking over the FUSE connection")?;
+        (session, listener, agent_listener)
+    };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&options.state_dir)
+        .with_context(|| format!("creating {}", options.state_dir.display()))?;
+    procs::harden()?;
 
     let session = session.spawn()?;
     {
@@ -124,10 +192,10 @@ pub fn run(options: &Options) -> Result<()> {
         "sshvault: serving {} on {}{}",
         options.mount.display(),
         options.socket.display(),
-        if privileged.is_some() {
-            ""
-        } else {
+        if options.unprivileged {
             " (unprivileged: no protection from your own processes)"
+        } else {
+            ""
         }
     );
     while !session.guard.is_finished() && !wait_for_signal(&signals, PRUNE_INTERVAL) {}
@@ -136,8 +204,9 @@ pub fn run(options: &Options) -> Result<()> {
     if session.guard.is_finished() {
         bail!("filesystem was unmounted from outside; exiting");
     }
-    if privileged.is_some() {
-        // only root may unmount now; the service manager does that after exit
+    if !options.unprivileged {
+        // the helper unmounts when this connection closes; systemd removes the sockets
+        drop(mount_connection);
         return Ok(());
     }
     let _ = std::fs::remove_file(&options.socket);
@@ -146,48 +215,30 @@ pub fn run(options: &Options) -> Result<()> {
     Ok(())
 }
 
-fn prepare_dirs(options: &Options, privileged: Option<&Account>) -> Result<()> {
-    let public = if privileged.is_some() { 0o755 } else { 0o700 };
-    let socket_dir = options
-        .socket
-        .parent()
-        .context("socket path has no parent directory")?;
-    let agent_dir = options
-        .agent_socket
-        .parent()
-        .context("agent socket path has no parent directory")?;
-    for (dir, mode) in [
-        (socket_dir, public),
-        (agent_dir, public),
-        (options.mount.as_path(), public),
-        (options.state_dir.as_path(), 0o700),
-    ] {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(mode)
-            .create(dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
-    }
-    if let Some(account) = privileged {
-        for dir in [socket_dir, agent_dir] {
-            let meta = std::fs::metadata(dir)?;
-            if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
-                bail!(
-                    "{} must be owned by root and writable only by root",
-                    dir.display()
-                );
-            }
+/// The control socket and the agent socket systemd passed in, told apart by path.
+fn sockets_from_systemd(options: &Options) -> Result<(UnixListener, UnixListener)> {
+    let mut listener = None;
+    let mut agent_listener = None;
+    for (_, fd) in systemd::listen_fds()? {
+        let socket = UnixListener::from(fd);
+        let bound = socket.local_addr()?.as_pathname().map(Path::to_path_buf);
+        if bound.as_deref() == Some(&options.socket) {
+            listener = Some(socket);
+        } else if bound.as_deref() == Some(&options.agent_socket) {
+            agent_listener = Some(socket);
         }
-        std::os::unix::fs::chown(&options.state_dir, Some(account.uid), Some(account.gid))
-            .with_context(|| {
-                format!(
-                    "handing {} to {}",
-                    options.state_dir.display(),
-                    account.name
-                )
-            })?;
     }
-    Ok(())
+    Ok((
+        listener.with_context(|| {
+            format!("systemd passed no socket for {}", options.socket.display())
+        })?,
+        agent_listener.with_context(|| {
+            format!(
+                "systemd passed no socket for {}",
+                options.agent_socket.display()
+            )
+        })?,
+    ))
 }
 
 fn serve(stream: &UnixStream, ctx: &Daemon) {
@@ -463,7 +514,7 @@ fn calling_shell(peer: &procs::PeerCred) -> Result<(u32, Pidfd)> {
     Ok((shell, handle))
 }
 
-fn bind_socket(path: &Path, public: bool) -> Result<UnixListener> {
+fn bind_socket(path: &Path) -> Result<UnixListener> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_socket() => {
             if UnixStream::connect(path).is_ok() {
@@ -474,12 +525,7 @@ fn bind_socket(path: &Path, public: bool) -> Result<UnixListener> {
         Ok(_) => bail!("{} exists and is not a socket", path.display()),
         Err(_) => {}
     }
-    let listener =
-        UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
-    // connecting needs write permission; callers are told apart by their credentials
-    let mode = if public { 0o666 } else { 0o600 };
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    Ok(listener)
+    UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))
 }
 
 fn block_termination_signals() -> Result<libc::sigset_t> {

@@ -1,0 +1,13 @@
+[Unit]
+Description=sshvault mount helper socket
+
+[Socket]
+ListenStream=/run/sshvault-mount.sock
+SocketUser=root
+SocketGroup=sshvault
+# only the daemon may ask for the mount
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

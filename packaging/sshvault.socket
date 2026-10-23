@@ -1,0 +1,12 @@
+[Unit]
+Description=sshvault control and agent sockets
+
+[Socket]
+ListenStream=/run/sshvault.sock
+ListenStream=/run/sshvault-agent.sock
+# everyone may connect; the daemon tells callers apart by their credentials
+SocketMode=0666
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

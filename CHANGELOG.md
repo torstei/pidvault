@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The daemon no longer starts as root. It runs as `sshvault` from the start, with no
+  capabilities and systemd's sandbox (read-only system, no `/home`, devices or network,
+  a system-call allow-list); `systemd-analyze security` rates it 0.5 instead of 6.4.
+  systemd creates its sockets, and a separate, minimal root unit, `sshvault-mount`, makes
+  the mount, hands it over and unmounts when the daemon goes away.
+
 ## 0.2.0
 
 The first published release.

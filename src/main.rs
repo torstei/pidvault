@@ -6,6 +6,7 @@ mod procs;
 mod protocol;
 mod secret;
 mod sessions;
+mod systemd;
 mod tree;
 mod users;
 mod vault;
@@ -58,22 +59,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Mount the vaults and serve requests (started by the systemd unit)
+    /// Serve the vaults (started by the systemd unit)
     Daemon {
-        /// Account the daemon drops to after mounting
-        #[arg(long, default_value = "sshvault")]
-        run_as: String,
         /// Where vaults are stored, one directory per uid
         #[arg(long, default_value = "/var/lib/sshvault")]
         state_dir: PathBuf,
-        /// Run as the invoking user. For testing only: the daemon is then
+        /// Mount and bind as the invoking user. For testing only: the daemon is then
         /// indistinguishable from any other process of that user.
         #[arg(long)]
         unprivileged: bool,
+        /// Where the mount helper hands over the FUSE connection
+        #[arg(long, default_value = "/run/sshvault-mount.sock")]
+        mount_socket: PathBuf,
         /// scrypt cost (log2) for wrapping vault keys; only lower it for tests
         #[arg(long, hide = true)]
         work_factor: Option<u8>,
     },
+    /// Mount the view for the daemon (run as root by its own systemd unit)
+    #[command(hide = true)]
+    MountHelper,
     /// Create a vault, empty or from a directory, and unlock it for the calling shell
     Create {
         #[arg(default_value = fs::DEFAULT_VAULT)]
@@ -177,19 +181,24 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Daemon {
-            run_as,
             state_dir,
             unprivileged,
+            mount_socket,
             work_factor,
         } => {
             daemon::run(&daemon::Options {
                 socket: cli.socket,
                 agent_socket: cli.agent_socket,
                 mount: cli.mount,
+                mount_socket,
                 state_dir,
-                run_as: (!unprivileged).then_some(run_as),
+                unprivileged,
                 wrap_work_factor: work_factor,
             })?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::MountHelper => {
+            daemon::mount_helper(&cli.mount)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Create {
