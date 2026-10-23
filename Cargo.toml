@@ -3,6 +3,9 @@ name = "sshvault"
 version = "0.1.0"
 edition = "2024"
 description = "Per-shell access to an encrypted SSH configuration directory"
+license = "MIT OR Apache-2.0"
+authors = ["Torstein Tauno Svendsen <torstei@gmail.com>"]
+repository = "https://github.com/torstei/sshvault"
 
 [dependencies]
 age = "0.12.1"
