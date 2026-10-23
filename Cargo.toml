@@ -16,9 +16,15 @@ fuser = { version = "0.18.0", default-features = false }
 getrandom = "0.4.3"
 libc = "0.2.191"
 rpassword = "7.5.4"
+rsa = { version = "0.9", default-features = false, features = ["sha2"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10"
+signature = "2"
+ssh-encoding = { version = "0.2", features = ["base64"] }
+ssh-key = { version = "0.6.7", features = ["ed25519", "rsa", "p256", "p384", "std"] }
 tar = "0.4.46"
+toml = "1.1.8"
 zeroize = { version = "1.9.1", features = ["serde"] }
 
 [dev-dependencies]

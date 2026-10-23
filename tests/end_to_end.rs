@@ -120,6 +120,7 @@ impl Fixture {
     fn command(&self, program: &str) -> Command {
         let mut cmd = Command::new(program);
         cmd.env("SSHVAULT_SOCKET", self.path("control.sock"))
+            .env("SSHVAULT_AGENT_SOCKET", self.path("agent.sock"))
             .env("SSHVAULT_MOUNT", self.path("mnt"))
             .env("SSHVAULT_INSECURE_ALLOW_SAME_UID_DAEMON", "1")
             .env("SV", BIN)
@@ -513,11 +514,15 @@ fn real_ssh_login_uses_the_vault_key_only_from_the_unlocked_shell() {
     let user = std::env::var("USER").unwrap();
     let config = format!(
         "Host vaulthost\n  HostName 127.0.0.1\n  Port {}\n  User {user}\n  IdentityFile @MNT@/id_test\n  \
-         IdentitiesOnly yes\n  IdentityAgent none\n  BatchMode yes\n  StrictHostKeyChecking no\n  \
+         IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking no\n  \
          UserKnownHostsFile /dev/null\n  LogLevel ERROR\n",
         sshd.port
     );
-    let Some(f) = Fixture::start(&[("config", &config), ("id_test", &private)]) else {
+    let Some(f) = Fixture::start(&[
+        ("config", &config),
+        ("id_test", &private),
+        ("id_test.pub", &public),
+    ]) else {
         return;
     };
     let stub = write_stub(&f);
@@ -885,11 +890,15 @@ fn ssh_records_host_keys_in_the_vault_and_ssh_keygen_can_remove_them() {
     let user = std::env::var("USER").unwrap();
     let config = format!(
         "Host vaulthost\n  HostName 127.0.0.1\n  Port {}\n  User {user}\n  IdentityFile @MNT@/id_test\n  \
-         IdentitiesOnly yes\n  IdentityAgent none\n  BatchMode yes\n  UserKnownHostsFile @MNT@/known_hosts\n  \
+         IdentitiesOnly yes\n  BatchMode yes\n  UserKnownHostsFile @MNT@/known_hosts\n  \
          StrictHostKeyChecking accept-new\n  LogLevel ERROR\n",
         sshd.port
     );
-    let Some(f) = Fixture::start(&[("config", &config), ("id_test", &private)]) else {
+    let Some(f) = Fixture::start(&[
+        ("config", &config),
+        ("id_test", &private),
+        ("id_test.pub", &public),
+    ]) else {
         return;
     };
     let stub = write_stub(&f);
@@ -960,4 +969,118 @@ fn status_right_after_a_restart_lists_the_vaults() {
     f.restart_daemon();
     let o = f.command(BIN).arg("status").output().unwrap();
     assert!(stdout(&o).starts_with("default: locked here"), "{o:?}");
+}
+
+#[test]
+fn keys_can_be_written_into_a_vault_but_never_read_back() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let script = r#"
+        cd "$MNT"
+        ssh-keygen -q -t ed25519 -N '' -C made-here -f id_new
+        cat id_new >/dev/null 2>&1 && echo read-key
+        stat -c %a id_new
+        grep -q made-here id_new.pub && echo pub-readable
+        printf X | dd of=id_new conv=notrunc 2>/dev/null && echo overwrote
+        cp id_new /tmp/stolen-$$ 2>/dev/null && echo copied-out
+        mv id_new id_moved && cat id_moved >/dev/null 2>&1 && echo read-after-rename
+        ssh-keygen -q -t ed25519 -N 'a passphrase' -f id_protected
+        head -1 id_protected
+    "#;
+    let o = f.unlocked_shell(script);
+    assert_eq!(
+        stdout(&o),
+        "200\npub-readable\n-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        "{o:?}"
+    );
+}
+
+#[test]
+fn the_agent_offers_vault_keys_only_to_unlocked_shells() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let o = f.unlocked_shell(
+        r#"ssh-keygen -q -t ed25519 -N '' -C vault-key -f "$MNT/id_agent"
+           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l | grep -c vault-key
+           ssh-keygen -q -t ed25519 -N '' -f /tmp/extra-$$
+           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add /tmp/extra-$$ 2>/dev/null && echo added
+           rm -f /tmp/extra-$$ /tmp/extra-$$.pub
+           "$SV" lock >/dev/null
+           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l"#,
+    );
+    assert_eq!(stdout(&o), "1\nThe agent has no identities.\n", "{o:?}");
+    let outsider = f.outsider(r#"SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l"#);
+    assert_eq!(stdout(&outsider), "The agent has no identities.\n");
+}
+
+#[test]
+fn a_broken_agent_policy_shows_in_status() {
+    let Some(f) = Fixture::start(&[
+        ("config", CONFIG),
+        ("agent.toml", "[keys.x]\nforwrd = true\n"),
+    ]) else {
+        return;
+    };
+    let o = f.unlocked_shell("\"$SV\" status");
+    assert!(stdout(&o).contains("agent.toml is not valid"), "{o:?}");
+}
+
+#[test]
+fn forwarded_connections_get_only_keys_the_policy_allows() {
+    let keys = tempfile::tempdir().unwrap();
+    let key = keys.path().join("id_test");
+    assert!(
+        Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", "vault-key", "-f"])
+            .arg(&key)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let private = std::fs::read_to_string(&key).unwrap();
+    let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+    let Some(sshd) = start_sshd(keys.path(), &public) else {
+        return;
+    };
+    let user = std::env::var("USER").unwrap();
+    let config = format!(
+        "Host vaulthost\n  HostName 127.0.0.1\n  Port {}\n  User {user}\n  IdentityFile @MNT@/id_test\n  \
+         IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  \
+         ForwardAgent yes\n  LogLevel ERROR\n",
+        sshd.port
+    );
+    let Some(f) = Fixture::start(&[
+        ("config", &config),
+        ("id_test", &private),
+        ("id_test.pub", &public),
+    ]) else {
+        return;
+    };
+    let stub = write_stub(&f);
+    // no private key beside it, so ssh-keygen can only sign through the forwarded agent
+    let lone_public = f.path("lone.pub");
+    std::fs::write(&lone_public, &public).unwrap();
+    let remote = format!(
+        "ssh -F {} vaulthost 'ssh-add -l; ssh-keygen -Y sign -n test -f {} </dev/null >/dev/null 2>&1 && echo signed'",
+        stub.display(),
+        lone_public.display()
+    );
+    let denied = f.unlocked_shell(&remote);
+    assert_eq!(
+        stdout(&denied),
+        "The agent has no identities.\n",
+        "{denied:?}"
+    );
+
+    let allow = format!(
+        "printf '[keys.\"id_test\"]\\nforward = true\\n' > \"$MNT/agent.toml\" && {remote}"
+    );
+    let allowed = f.unlocked_shell(&allow);
+    let out = stdout(&allowed);
+    assert!(
+        out.contains("vault-key") && out.ends_with("signed\n"),
+        "{allowed:?}"
+    );
 }

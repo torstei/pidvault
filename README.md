@@ -27,12 +27,13 @@ None of this is a bug. On Unix, the boundary is the user id, and everything you 
 ## What sshvault does instead
 
 Access is granted per shell, not per login. A shell that has run `sshvault unlock`, and
-every process it starts, sees your decrypted `config` and keys under
-`/run/sshvault/default/`. Every other process running as you sees an empty directory. With
-several vaults, each shell sees only the ones it unlocked: one shell can have your GitHub
-key and another your production keys. There is no agent socket to
-find, nothing to borrow, and neither keys nor config sit in your home directory for other
-processes to read or rewrite.
+every process it starts, sees your decrypted `config` under `/run/sshvault/default/` and
+can sign with the keys stored there — through sshvault's own agent, which answers only
+processes of unlocked shells. The keys themselves cannot be read, not even from an
+unlocked shell, so nothing running there can take them along. Every other process running
+as you sees an empty directory and an agent with no keys. With several vaults, each shell
+sees only the ones it unlocked: one shell can have your GitHub key and another your
+production keys.
 
 ## What it does not do
 
@@ -41,10 +42,11 @@ without making SSH painful to work with: you unlock once per shell, and everythi
 behaves as before. It draws the line at the shell you unlocked, and a lot is still yours
 to get right:
 
-- **What you do in an unlocked shell.** Anything started there has access, including the
-  AI agent or the `curl | sh` you run in it — and access includes changing the vault, so
-  whatever it plants there is still there in the next shell you unlock. Keep a shell for
-  SSH and do the risky things elsewhere.
+- **What you do in an unlocked shell.** Anything started there can sign with your keys
+  while the shell is unlocked, including the AI agent or the `curl | sh` you run in it.
+  It cannot copy them, but it can change the vault, and whatever it plants there is still
+  there in the next shell you unlock. Keep a shell for SSH and do the risky things
+  elsewhere.
 - **A replaced `ssh`, or strange things in `$PATH`.** Your own processes can write to
   `~/.local/bin`, `~/.bashrc` and the other files your shell trusts. An alias, a function
   or a binary planted there runs inside the next shell you unlock, and sshvault cannot
@@ -68,34 +70,68 @@ sshvault unlock                             # in each further shell that should 
 `sshvault create --from DIR` starts from the files in a directory instead of an empty
 vault. Keys you copy in from `~/.ssh` have been readable by every process you ran so far:
 the clean move is to generate new ones straight into the vault, e.g.
-`ssh-keygen -t ed25519 -f /run/sshvault/default/id_ed25519`, and retire the old ones.
+`ssh-keygen -t ed25519 -N '' -f /run/sshvault/default/id_ed25519`, and retire the old ones.
 
 `sshvault stub` prints a block that must sit at the top of `~/.ssh/config`:
 
 ```
 Match exec "/usr/bin/sshvault status --quiet"
+    IdentityAgent /run/sshvault-agent.sock
     AddKeysToAgent no
     Include /run/sshvault/*/config
 ```
 
-In a shell with a vault unlocked, the vaults' entries take precedence, and no key is
-handed to an agent, whatever a later `AddKeysToAgent yes` says: an agent would make the
-keys available to every process again. Everywhere else the block does nothing and your
-existing config applies as before, so you can migrate one host at a time. `~/.ssh`
-itself, `authorized_keys` and inbound SSH are untouched. `ssh-add` on a vault key would
-still hand it over; don't.
+In a shell with a vault unlocked, the vaults' entries take precedence and ssh signs
+through the vault agent, never handing a key to any other agent whatever a later
+`AddKeysToAgent yes` says. Everywhere else the block does nothing and your existing
+config applies as before, so you can migrate one host at a time. `~/.ssh` itself,
+`authorized_keys` and inbound SSH are untouched. Shells with a vault unlocked do not use
+your desktop agent, so a key you still keep there works only in other shells until you
+move it into a vault.
 
 An unlocked shell, and everything it starts, can change the vault like any directory:
 editors, `sed -i`, `ssh-keygen` and `ssh` itself all work. Changes are saved on `fsync`,
 when a written file is closed, on a rename, and otherwise within a second.
 
 Inside the vault, refer to files through the mount, e.g.
-`IdentityFile /run/sshvault/default/id_ed25519` and
+`IdentityFile /run/sshvault/default/id_ed25519` (with its `.pub` beside it) and
 `UserKnownHostsFile /run/sshvault/default/known_hosts`. Keep `ControlPath` elsewhere
 (`$XDG_RUNTIME_DIR`): unix sockets cannot live on the mount. A vault holds up to 4 MiB.
 
 Other commands: `sshvault status`, `sshvault lock` (this shell) and `sshvault lock --all`
 (every shell), and `sshvault passwd` to change a passphrase.
+
+### Keys and the agent
+
+A file in a vault is a key when it is an unencrypted private key in OpenSSH format, as
+`ssh-keygen -N ''` writes them. sshvault tells by its first bytes, which hold nothing
+secret, so a key is protected from the moment it is written:
+
+- It shows as mode `200` and cannot be opened for reading by anyone. Its bytes cannot be
+  changed either, only appended to, emptied, renamed or deleted, so nothing can turn it
+  back into a readable file; a copy is a key too. `export` (which asks for the
+  passphrase) is the only way to get it out again.
+- The vault agent signs with it, for processes of shells that unlocked that vault, and
+  checks that on every request: lock the vault and its keys stop working at once.
+  Asking the agent to add or remove keys (`ssh-add`) is refused; keys get in by being
+  written to a vault.
+- Everything else stays an ordinary file: `config`, `known_hosts`, `.pub` files, and keys
+  with a passphrase (which the agent cannot use; `ssh-keygen -p -N '' -f KEY` removes
+  the passphrase, after which the key is protected). Keys in the old PEM format stay
+  ordinary too; `ssh-keygen -p -f KEY` rewrites them in OpenSSH format.
+
+ssh tells the agent which connections it opens on behalf of a host you forward your
+agent to. On those, the vault agent offers no key unless the vault's `agent.toml` allows
+it, so remote root cannot sign with your keys even where `ForwardAgent yes` is set:
+
+```toml
+# /run/sshvault/default/agent.toml
+[keys."id_jump"]          # the key's path in the vault
+forward = true            # may sign through hosts this agent is forwarded to
+```
+
+A policy that cannot be read lets nothing be forwarded, and `sshvault status` says why.
+Older ssh versions do not mark forwarded connections; with those, everything looks local.
 
 ### More than one vault
 

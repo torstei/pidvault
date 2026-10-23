@@ -7,10 +7,12 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Result, bail};
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
-    Generation, INodeNo, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow, WriteFlags,
+    Generation, INodeNo, LockOwner, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate,
+    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
+    WriteFlags,
 };
 
+use crate::keys;
 use crate::procs::{self, Pidfd};
 use crate::sessions::Sessions;
 use crate::tree::{self, Kind, Node, Tree, TreeError};
@@ -337,6 +339,7 @@ fn errno(e: TreeError) -> Errno {
         TreeError::NotEmpty => Errno::ENOTEMPTY,
         TreeError::Invalid => Errno::EINVAL,
         TreeError::NoSpace => Errno::ENOSPC,
+        TreeError::KeyIsImmutable => Errno::EPERM,
     }
 }
 
@@ -465,7 +468,12 @@ impl VaultFs {
             Target::Node(user, _, _, node) => match &node.kind {
                 Kind::File { mode, data } => (
                     FileType::RegularFile,
-                    *mode as u16,
+                    // keys are write-only, so the kernel refuses to open them for reading
+                    if keys::is_private_key(data) {
+                        0o200
+                    } else {
+                        *mode as u16
+                    },
                     data.len() as u64,
                     1,
                     user.account.uid,
@@ -730,9 +738,14 @@ impl Filesystem for VaultFs {
         }
     }
 
-    fn open(&self, req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let state = lock(&self.state);
         match self.target(&state, req, ino.0) {
+            Some(Target::Node(.., node))
+                if is_key(node) && flags.acc_mode() != OpenAccMode::O_WRONLY =>
+            {
+                reply.error(Errno::EACCES)
+            }
             // direct I/O keeps file contents out of the shared page cache
             Some(Target::Node(.., node)) if matches!(node.kind, Kind::File { .. }) => {
                 reply.opened(FileHandle(0), FopenFlags::FOPEN_DIRECT_IO)
@@ -760,6 +773,9 @@ impl Filesystem for VaultFs {
         let Kind::File { data, .. } = &node.kind else {
             return reply.error(Errno::EISDIR);
         };
+        if keys::is_private_key(data) {
+            return reply.error(Errno::EACCES);
+        }
         let start = (offset as usize).min(data.len());
         let end = start.saturating_add(size as usize).min(data.len());
         reply.data(&data[start..end]);
@@ -905,6 +921,10 @@ impl VaultFs {
         let ino = Self::node_ino(user, vault, child);
         Some(self.attr(ino, &Target::Node(user, vault, child, tree.node(child)?)))
     }
+}
+
+fn is_key(node: &Node) -> bool {
+    matches!(&node.kind, Kind::File { data, .. } if keys::is_private_key(data))
 }
 
 fn push_children(

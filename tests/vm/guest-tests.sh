@@ -49,6 +49,7 @@ check "sshvault is a system account without a shell" \
 check "view is mounted" equals "$(findmnt -n -o SOURCE,FSTYPE /run/sshvault)" "sshvault fuse"
 check "mount root belongs to the daemon" equals "$(stat -c '%U %a' /run/sshvault)" "sshvault 755"
 check "socket is connectable by all, in root's /run" equals "$(stat -c '%A %U' /run/sshvault.sock)" "srw-rw-rw- root"
+check "agent socket is connectable by all, in root's /run" equals "$(stat -c '%A %U' /run/sshvault-agent.sock)" "srw-rw-rw- root"
 check "vault store belongs to the daemon" equals "$(stat -c '%U %a' /var/lib/sshvault)" "sshvault 700"
 
 # --- users with real user managers -------------------------------------------
@@ -72,8 +73,7 @@ as alice sh -c '
     mkdir -p ~/src ~/.ssh && chmod 700 ~/.ssh
     ssh-keygen -q -t ed25519 -N "" -f ~/src/id_vm
     cat ~/src/id_vm.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
-    rm ~/src/id_vm.pub
-    printf "Host vm\n  HostName 127.0.0.1\n  User alice\n  IdentityFile /run/sshvault/default/id_vm\n  IdentitiesOnly yes\n  IdentityAgent none\n  BatchMode yes\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n" > ~/src/config
+    printf "Host vm\n  HostName 127.0.0.1\n  User alice\n  IdentityFile /run/sshvault/default/id_vm\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n" > ~/src/config
     sshvault stub > ~/.ssh/config
 '
 check "alice creates a vault" as alice sh -c \
@@ -107,6 +107,14 @@ check "decrypted vault is held in locked memory" \
     awk '/^VmLck:/ { exit !($2 > 0) }' "/proc/$(daemon_pid)/status"
 
 check "ssh login with the vault key from an unlocked shell" equals "$(unlocked alice 'ssh vm echo logged-in')" logged-in
+check "the login signed through the vault agent: the key itself cannot be read" refused unlocked alice \
+    'cat /run/sshvault/default/id_vm >/dev/null'
+check "the vault agent offers alice's other processes nothing" equals \
+    "$(as alice env SSH_AUTH_SOCK=/run/sshvault-agent.sock ssh-add -l 2>&1)" "The agent has no identities."
+check "the vault agent offers bob none of alice's keys" equals \
+    "$(unlocked bob 'SSH_AUTH_SOCK=/run/sshvault-agent.sock ssh-add -l 2>&1')" "The agent has no identities."
+check "a host alice forwards her agent to gets no vault keys" equals \
+    "$(unlocked alice 'ssh -o ForwardAgent=yes vm ssh-add -l 2>&1')" "The agent has no identities."
 check "the same ssh from another process of alice fails" refused as alice ssh vm true
 check "naming the key explicitly does not help" refused as alice ssh -F /dev/null -o BatchMode=yes \
     -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -176,7 +184,7 @@ check "vaults survive reinstalling" unlocked bob 'grep -q bob-from-vault /run/ss
 check "package removes" apt-get remove -y -q sshvault
 check "service is stopped after removal" refused systemctl is-active --quiet sshvault
 check "view is unmounted after removal" refused findmnt /run/sshvault
-check "socket is gone after removal" refused test -e /run/sshvault.sock
+check "sockets are gone after removal" refused test -e /run/sshvault.sock -o -e /run/sshvault-agent.sock
 check "vaults are kept on removal" test -s "$ALICE_VAULT"
 check "package purges" apt-get purge -y -q sshvault
 check "vaults are kept on purge" test -s "$ALICE_VAULT"

@@ -1,5 +1,7 @@
+mod agent;
 mod daemon;
 mod fs;
+mod keys;
 mod procs;
 mod protocol;
 mod secret;
@@ -33,6 +35,14 @@ struct Cli {
         default_value = "/run/sshvault.sock"
     )]
     socket: PathBuf,
+    /// The agent that signs with vault keys
+    #[arg(
+        long,
+        global = true,
+        env = "SSHVAULT_AGENT_SOCKET",
+        default_value = "/run/sshvault-agent.sock"
+    )]
+    agent_socket: PathBuf,
     /// Where the daemon mounts; each of your vaults is a directory inside it
     #[arg(
         long,
@@ -157,6 +167,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => {
             daemon::run(&daemon::Options {
                 socket: cli.socket,
+                agent_socket: cli.agent_socket,
                 mount: cli.mount,
                 state_dir,
                 run_as: (!unprivileged).then_some(run_as),
@@ -314,7 +325,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             )?)
         }
         Command::Stub => {
-            println!("{}", stub(&cli.mount)?);
+            println!("{}", stub(&cli.mount, &cli.agent_socket)?);
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -335,18 +346,24 @@ fn print_status(reply: &Response) {
                 vault.name, vault.sessions
             ),
         }
+        for note in &vault.notes {
+            println!("  {note}");
+        }
     }
 }
 
-fn stub(mount: &Path) -> Result<String> {
+fn stub(mount: &Path, agent_socket: &Path) -> Result<String> {
     let exe = std::env::current_exe().context("cannot tell where sshvault is installed")?;
     Ok(format!(
         "# sshvault: keep this block above every Host and Match block. In a shell with a vault\n\
-         # unlocked, vault entries take precedence and no key is handed to an agent.\n\
+         # unlocked, vault entries take precedence, vault keys sign through the vault agent,\n\
+         # and no key is handed to any other agent.\n\
          Match exec \"{} status --quiet\"\n\
+         \x20   IdentityAgent {}\n\
          \x20   AddKeysToAgent no\n\
          \x20   Include {}",
         exe.display(),
+        agent_socket.display(),
         mount.join("*").join("config").display()
     ))
 }

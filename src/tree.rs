@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 
+use crate::keys;
 use crate::secret::{MAX_SECRET, SecretBuf};
 
 pub const ROOT: u64 = 1;
@@ -35,6 +36,9 @@ pub enum TreeError {
     NotEmpty,
     Invalid,
     NoSpace,
+    /// The bytes of a private key can be appended to but never changed, so its opening,
+    /// which is what marks it as a key, cannot be undone to make the rest readable.
+    KeyIsImmutable,
 }
 
 type TreeResult<T> = std::result::Result<T, TreeError>;
@@ -268,6 +272,9 @@ impl Tree {
             Kind::Dir { .. } => return Err(TreeError::IsDir),
         };
         let end = offset.checked_add(bytes.len()).ok_or(TreeError::NoSpace)?;
+        if offset < current && self.is_key(ino) {
+            return Err(TreeError::KeyIsImmutable);
+        }
         self.check_space(end.saturating_sub(current))?;
         let (data, mtime) = self.file_mut(ino)?;
         data.write_at(offset, bytes)
@@ -282,11 +289,51 @@ impl Tree {
             Kind::File { data, .. } => data.len(),
             Kind::Dir { .. } => return Err(TreeError::IsDir),
         };
+        if len != 0 && len != current && self.is_key(ino) {
+            return Err(TreeError::KeyIsImmutable);
+        }
         self.check_space(len.saturating_sub(current))?;
         let (data, mtime) = self.file_mut(ino)?;
         data.truncate(len).map_err(|_| TreeError::NoSpace)?;
         *mtime = SystemTime::now();
         Ok(())
+    }
+
+    pub fn is_key(&self, ino: u64) -> bool {
+        matches!(self.node(ino).map(|n| &n.kind), Some(Kind::File { data, .. }) if keys::is_private_key(data))
+    }
+
+    /// Every private key in the tree, with its path.
+    pub fn keys(&self) -> Vec<(PathBuf, &SecretBuf)> {
+        let mut found = Vec::new();
+        let mut pending = vec![(ROOT, PathBuf::new())];
+        while let Some((dir, path)) = pending.pop() {
+            let Some(Kind::Dir { entries }) = self.node(dir).map(|n| &n.kind) else {
+                continue;
+            };
+            for (name, &child) in entries {
+                match self.node(child).map(|n| &n.kind) {
+                    Some(Kind::Dir { .. }) => pending.push((child, path.join(name))),
+                    Some(Kind::File { data, .. }) if keys::is_private_key(data) => {
+                        found.push((path.join(name), data))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        found
+    }
+
+    /// The contents of the file at `path`, relative to the root.
+    pub fn file_at(&self, path: &Path) -> Option<&SecretBuf> {
+        let mut ino = ROOT;
+        for name in normal_components(path).ok()? {
+            ino = self.child(ino, &name)?;
+        }
+        match &self.node(ino)?.kind {
+            Kind::File { data, .. } => Some(data),
+            Kind::Dir { .. } => None,
+        }
     }
 
     pub fn set_mode(&mut self, ino: u64, new_mode: u32) -> TreeResult<()> {
@@ -558,6 +605,32 @@ mod tests {
             (0o400, b"PRIVATE".to_vec())
         );
         assert!(back.child(ROOT, name("empty")).is_some());
+    }
+
+    #[test]
+    fn a_key_can_be_appended_to_and_emptied_but_never_changed() {
+        let mut tree = Tree::empty();
+        let ino = tree.create_file(ROOT, name("id"), 0o600).unwrap();
+        tree.write(ino, 0, b"-----BEGIN OPENSSH PRIVATE KEY-----\n")
+            .unwrap();
+        tree.write(ino, 36, b"b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ")
+            .unwrap();
+        assert!(tree.is_key(ino));
+        tree.write(ino, 78, b"SECRET").unwrap();
+        assert!(matches!(
+            tree.write(ino, 0, b"x"),
+            Err(TreeError::KeyIsImmutable)
+        ));
+        assert!(matches!(
+            tree.truncate(ino, 10),
+            Err(TreeError::KeyIsImmutable)
+        ));
+        assert!(tree.is_key(ino));
+        assert_eq!(tree.keys().len(), 1);
+        tree.truncate(ino, 0).unwrap();
+        assert!(!tree.is_key(ino));
+        tree.write(ino, 0, b"Host x\n").unwrap();
+        assert!(tree.keys().is_empty());
     }
 
     #[test]

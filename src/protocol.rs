@@ -61,6 +61,9 @@ pub struct VaultStatus {
     pub unlocked_by: Option<u32>,
     /// Shells of the caller's user that have this vault unlocked.
     pub sessions: usize,
+    /// Problems worth telling the user about, such as an unreadable agent policy.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
