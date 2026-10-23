@@ -8,8 +8,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  # a slow package mirror should fail the step quickly, not stall the job
+  APT_OPTIONS: -q -o Acquire::Retries=3 -o Acquire::http::Timeout=30
 
 jobs:
   test:
@@ -20,7 +26,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Install FUSE and sshd for the end-to-end tests
-        run: sudo apt-get update -q && sudo apt-get install -y -q fuse3 openssh-server
+        timeout-minutes: 5
+        run: |
+          sudo apt-get $APT_OPTIONS update
+          sudo apt-get $APT_OPTIONS install -y --no-install-recommends fuse3 openssh-server
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -48,9 +57,11 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - name: Install QEMU and image tooling
+        timeout-minutes: 5
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q qemu-system-x86 qemu-utils genisoimage gpgv ubuntu-cloudimage-keyring
+          sudo apt-get $APT_OPTIONS update
+          sudo apt-get $APT_OPTIONS install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils genisoimage gpgv ubuntu-cloudimage-keyring
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal && rustup default stable
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
