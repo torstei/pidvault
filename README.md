@@ -61,7 +61,7 @@ to get right:
 ```sh
 sudo apt install ./sshvault_*.deb           # once per machine; starts the service
 sshvault create                             # once: asks for a passphrase, unlocks this shell
-$EDITOR /run/sshvault/default/config        # fill the vault from this shell
+$EDITOR /run/sshvault/default/config        # starts as a commented example
 sshvault stub                               # once: put its output at the top of ~/.ssh/config
 sshvault unlock                             # in each further shell that should have access
 ```
@@ -88,6 +88,14 @@ config applies as before, so you can migrate one host at a time. `~/.ssh` itself
 `authorized_keys` and inbound SSH are untouched. Shells with a vault unlocked do not use
 your desktop agent, so a key you still keep there works only in other shells until you
 move it into a vault.
+
+If that block is more magic than you want in `~/.ssh/config`, leave it out and name the
+vault's config yourself: `ssh -F /run/sshvault/default/config HOST`. A new vault's
+starter `config` already points ssh at the vault agent, so nothing else is needed. `-F`
+replaces `~/.ssh/config` and `/etc/ssh/ssh_config` rather than adding to them; jump hosts
+work with `ProxyJump`, which passes `-F` on, but not with a `ProxyCommand` running
+`ssh`, which does not; and other tools need telling too (`scp -F`,
+`rsync -e "ssh -F …"`, git's `core.sshCommand`).
 
 An unlocked shell, and everything it starts, can change the vault like any directory:
 editors, `sed -i`, `ssh-keygen` and `ssh` itself all work. Changes are saved on `fsync`,
