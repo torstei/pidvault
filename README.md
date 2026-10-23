@@ -120,6 +120,15 @@ secret, so a key is protected from the moment it is written:
   the passphrase, after which the key is protected). Keys in the old PEM format stay
   ordinary too; `ssh-keygen -p -f KEY` rewrites them in OpenSSH format.
 
+To bring in a key you already have, `sshvault add-key ~/.ssh/id_github` (with `--vault`
+and `--name` if you like) asks once for its passphrase, if it has one, and writes the key
+without it, and its `.pub`, into the vault. The original is left alone: it has been
+readable by every process you ran, so retire it once the copy works.
+
+A key that deserves more protection than the rest belongs in a vault of its own: its own
+passphrase, unlocked only in the shell that needs it, locked again with
+`sshvault lock signing`, and with its own `agent.toml`.
+
 ssh tells the agent which connections it opens on behalf of a host you forward your
 agent to. On those, the vault agent offers no key unless the vault's `agent.toml` allows
 it, so remote root cannot sign with your keys even where `ForwardAgent yes` is set:

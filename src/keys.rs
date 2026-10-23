@@ -15,6 +15,37 @@ pub fn is_private_key(data: &[u8]) -> bool {
     data.starts_with(PLAIN_OPENSSH_KEY)
 }
 
+/// A key ready to be written to a vault: unprotected, since the vault protects it.
+pub struct Importable {
+    pub private: zeroize::Zeroizing<String>,
+    pub public: String,
+    pub fingerprint: String,
+}
+
+/// Prepares the key file `data` for a vault, asking `passphrase` only if it is protected.
+pub fn importable(
+    data: &[u8],
+    passphrase: impl FnOnce() -> Result<zeroize::Zeroizing<String>>,
+) -> Result<Importable> {
+    let key = PrivateKey::from_openssh(data).map_err(|_| {
+        anyhow::anyhow!(
+            "not a private key in OpenSSH format; an older PEM key can be copied into the vault \
+             and converted there with `ssh-keygen -p -N '' -f COPY`"
+        )
+    })?;
+    let key = if key.is_encrypted() {
+        key.decrypt(passphrase()?.as_bytes())
+            .map_err(|_| anyhow::anyhow!("wrong passphrase"))?
+    } else {
+        key
+    };
+    Ok(Importable {
+        private: key.to_openssh(ssh_key::LineEnding::LF)?,
+        public: key.public_key().to_openssh()?,
+        fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
+    })
+}
+
 const SSH_AGENT_RSA_SHA2_256: u32 = 2;
 const SSH_AGENT_RSA_SHA2_512: u32 = 4;
 
@@ -151,6 +182,50 @@ mod tests {
                 .verify(b"challenge", &signature)
                 .unwrap_or_else(|e| panic!("{kind}: {e}"));
         }
+    }
+
+    #[test]
+    fn protected_keys_become_unprotected_on_the_way_in() {
+        for kind in ["ed25519", "rsa", "ecdsa"] {
+            let protected = keygen(kind, "secret");
+            let ready = importable(&protected, || {
+                Ok(zeroize::Zeroizing::new("secret".to_owned()))
+            })
+            .unwrap();
+            assert!(is_private_key(ready.private.as_bytes()), "{kind}");
+            assert!(ready.public.ends_with(" test"), "{kind}: {}", ready.public);
+            assert!(
+                importable(&protected, || Ok(zeroize::Zeroizing::new(
+                    "wrong".to_owned()
+                )))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn unprotected_keys_need_no_passphrase() {
+        let plain = keygen("ed25519", "");
+        let ready = importable(&plain, || panic!("asked for a passphrase")).unwrap();
+        assert!(is_private_key(ready.private.as_bytes()));
+    }
+
+    #[test]
+    fn pem_keys_are_refused_with_a_way_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        assert!(
+            Command::new("ssh-keygen")
+                .args(["-q", "-m", "PEM", "-t", "rsa", "-b", "2048", "-N", "", "-f"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let err = importable(&std::fs::read(path).unwrap(), || panic!("asked"))
+            .err()
+            .unwrap();
+        assert!(format!("{err}").contains("ssh-keygen -p"), "{err}");
     }
 
     #[test]
