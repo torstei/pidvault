@@ -92,30 +92,17 @@ pub fn peer_cred(stream: &UnixStream) -> io::Result<PeerCred> {
     })
 }
 
-/// Keeps other processes running as the same user out of this one's memory.
-/// Returns what could not be applied; refuses to continue if already traced.
-pub fn harden() -> io::Result<Vec<String>> {
-    let mut warnings = Vec::new();
-    unsafe {
-        if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let no_core = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0 {
-            warnings.push(format!(
-                "cannot disable core dumps: {}",
-                io::Error::last_os_error()
-            ));
-        }
+/// Keeps other processes out of this one's memory; refuses to continue if already traced.
+pub fn harden() -> io::Result<()> {
+    // also suppresses core dumps, which would hold decrypted vaults
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
     }
     // checked after PR_SET_DUMPABLE so no tracer can attach in between
     if tracer_pid()? != 0 {
         return Err(io::Error::other("refusing to run under a tracer"));
     }
-    Ok(warnings)
+    Ok(())
 }
 
 fn tracer_pid() -> io::Result<u32> {

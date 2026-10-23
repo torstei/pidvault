@@ -39,4 +39,7 @@ section = "net"
 depends = "$auto"
 assets = [["target/release/sshvault", "usr/bin/", "755"], ["README.md", "usr/share/doc/sshvault/README.md", "644"]]
 maintainer-scripts = "packaging"
-systemd-units = { unit-scripts = "packaging", enable = true, start = true }
+systemd-units = [
+    { unit-scripts = "packaging", enable = true, start = true },
+    { unit-scripts = "packaging", unit-name = "sshvault-mount", enable = true, start = true },
+]

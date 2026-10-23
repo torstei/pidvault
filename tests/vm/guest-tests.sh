@@ -38,6 +38,16 @@ unlocked() {
     as "$user" sh -c "echo $user-pass | sshvault unlock --passphrase-stdin >/dev/null && $*"
 }
 daemon_pid() { systemctl show --property MainPID --value sshvault; }
+# a check about the daemon process must fail, not pass, when there is none
+live_daemon() {
+    local pid
+    pid=$(daemon_pid)
+    [[ "$pid" -gt 0 ]] || { echo "no daemon running"; return 1; }
+    "$@" "$pid"
+}
+caps_dropped() { awk '/^Cap(Eff|Prm|Bnd):/ && $2 != "0000000000000000" { bad = 1 } END { exit bad }' "/proc/$1/status"; }
+own_network() { test "$(readlink "/proc/$1/ns/net")" != "$(readlink /proc/1/ns/net)"; }
+no_home() { ! nsenter --target "$1" --mount ls /home/ubuntu >/dev/null 2>&1; }
 
 # --- installation -----------------------------------------------------------
 
@@ -54,9 +64,16 @@ check "apt accepts the signed repository" apt-get update -q "${only_sshvault[@]}
 check "package installs from the repository" apt-get install -y -q sshvault
 check "service is active" systemctl is-active --quiet sshvault
 check "daemon runs as the sshvault account" equals "$(ps -o user= -p "$(daemon_pid)")" sshvault
+check "the daemon holds no capabilities" live_daemon caps_dropped
+check "the daemon has no network of its own" live_daemon own_network
+check "the daemon cannot see /home" live_daemon no_home
+check "the mount helper may hold no capability but CAP_SYS_ADMIN" sh -c \
+    'pid=$(systemctl show --property MainPID --value sshvault-mount); [ "$pid" -gt 0 ] && grep -q "^CapBnd:[[:space:]]*0000000000200000$" /proc/$pid/status'
+check "systemd rates the service's exposure below 2" \
+    sh -c 'systemd-analyze security sshvault.service --no-pager | awk "/Overall exposure level/ { exit !(\$(NF-2) < 2) }"'
 check "sshvault is a system account without a shell" \
     sh -c 'getent passwd sshvault | awk -F: "\$3 < 1000 && \$7 ~ /nologin\$/" | grep -q .'
-check "view is mounted" equals "$(findmnt -n -o SOURCE,FSTYPE /run/sshvault)" "sshvault fuse"
+check "view is mounted" equals "$(findmnt -n -o SOURCE,FSTYPE /run/sshvault)" "sshvault fuse.sshvault"
 check "mount root belongs to the daemon" equals "$(stat -c '%U %a' /run/sshvault)" "sshvault 755"
 check "socket is connectable by all, in root's /run" equals "$(stat -c '%A %U' /run/sshvault.sock)" "srw-rw-rw- root"
 check "agent socket is connectable by all, in root's /run" equals "$(stat -c '%A %U' /run/sshvault-agent.sock)" "srw-rw-rw- root"
@@ -197,7 +214,8 @@ check "vaults survive reinstalling" unlocked bob 'grep -q bob-from-vault /run/ss
 check "package removes" apt-get remove -y -q sshvault
 check "service is stopped after removal" refused systemctl is-active --quiet sshvault
 check "view is unmounted after removal" refused findmnt /run/sshvault
-check "sockets are gone after removal" refused test -e /run/sshvault.sock -o -e /run/sshvault-agent.sock
+check "sockets are gone after removal" refused \
+    test -e /run/sshvault.sock -o -e /run/sshvault-agent.sock -o -e /run/sshvault-mount.sock
 check "vaults are kept on removal" test -s "$ALICE_VAULT"
 check "package purges" apt-get purge -y -q sshvault
 check "vaults are kept on purge" test -s "$ALICE_VAULT"

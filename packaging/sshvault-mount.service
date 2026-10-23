@@ -1,0 +1,30 @@
+[Unit]
+Description=sshvault mount helper
+Requires=sshvault-mount.socket
+After=sshvault-mount.socket
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/sshvault mount-helper
+ExecStopPost=-/usr/bin/umount --lazy /run/sshvault
+Restart=on-failure
+UMask=0022
+
+# Root, and without a private mount namespace: the mount must be the host's, or users
+# would not see it. So nothing here may create one (ProtectSystem=, ProtectHome=,
+# PrivateTmp=, PrivateDevices=, ProtectKernelModules=, ...); what remains is restricted.
+CapabilityBoundingSet=CAP_SYS_ADMIN
+NoNewPrivileges=yes
+DevicePolicy=closed
+DeviceAllow=/dev/fuse rw
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectClock=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @mount
+SystemCallErrorNumber=EPERM

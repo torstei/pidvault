@@ -211,10 +211,14 @@ already unlocked see the new contents at once.
 
 ## How it works
 
-- One daemon per machine. systemd starts it as root; it mounts a single FUSE filesystem at
-  `/run/sshvault`, then irrevocably drops to the `sshvault` account before serving
-  anything. Your processes cannot signal it, trace it, read its memory, unmount the view or
-  place a socket or file where it lives (its socket is `/run/sshvault.sock`).
+- One daemon per machine, running as the `sshvault` account and never as root: no
+  capabilities, a read-only system, no `/home`, no devices, no network and a system-call
+  allow-list (`systemd-analyze security` rates it 0.5, "safe"). systemd creates its sockets
+  in root's `/run`, and a separate, minimal root service does the one thing that needs
+  root: it mounts the FUSE filesystem at `/run/sshvault`, hands the connection to the
+  daemon, and unmounts as soon as the daemon is gone. Your processes cannot signal the
+  daemon, trace it, read its memory, unmount the view or place a socket or file where it
+  lives.
 - The client refuses a daemon that runs as your own uid or whose socket directory is not
   root's: such a daemon could be any of your processes, waiting for your passphrase.
 - Each vault is one file, `/var/lib/sshvault/<uid>/<name>.sshvault`, readable only by the
@@ -260,7 +264,8 @@ Inside, `tests/vm/guest-tests.sh` installs the package and tests it as root, wit
 whose processes run under real `systemd --user` managers, then upgrades, removes and purges
 it. Results come back as TAP on the VM's second serial port.
 
-`packaging/` has the systemd unit and the `sysusers.d` entry for the `sshvault` account.
+`packaging/` has the systemd units — the daemon and its sockets, and the mount helper and
+its socket — and the `sysusers.d` entry for the `sshvault` account.
 
 To release, bump the version in `Cargo.toml`, add it to `CHANGELOG.md`, merge, and push a
 tag `vX.Y.Z` on `main`. The release workflow runs the full test suite, builds the package
