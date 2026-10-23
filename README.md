@@ -55,12 +55,18 @@ to get right:
 ## How it is meant to be used
 
 ```sh
-sudo systemctl enable --now sshvault        # once per machine
-sshvault create --from ~/ssh-to-migrate     # once: prompts for a passphrase
+sudo apt install ./sshvault_*.deb           # once per machine; starts the service
+sshvault create                             # once: asks for a passphrase, unlocks this shell
+$EDITOR /run/sshvault/self/config           # fill the vault from this shell
 sshvault stub                               # once: put its output at the top of ~/.ssh/config
-sshvault unlock                             # in each shell that should have access
-$EDITOR /run/sshvault/self/config           # edit the vault from an unlocked shell
+sshvault unlock                             # in each further shell that should have access
 ```
+
+`create` and `import` unlock the shell they ran in; `--no-unlock` leaves it locked.
+`sshvault create --from DIR` starts from the files in a directory instead of an empty
+vault. Keys you copy in from `~/.ssh` have been readable by every process you ran so far:
+the clean move is to generate new ones straight into the vault, e.g.
+`ssh-keygen -t ed25519 -f /run/sshvault/self/id_ed25519`, and retire the old ones.
 
 `sshvault stub` prints an `Include` line that must sit at the top of `~/.ssh/config`. In an
 unlocked shell the vault's entries take precedence; everywhere else the include resolves
