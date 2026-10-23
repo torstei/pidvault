@@ -9,7 +9,7 @@ Type=exec
 ExecStartPre=-/usr/bin/umount --lazy /run/sshvault
 ExecStart=/usr/bin/sshvault daemon
 ExecStopPost=-/usr/bin/umount --lazy /run/sshvault
-ExecStopPost=-/usr/bin/rm -f /run/sshvault.sock
+ExecStopPost=-/usr/bin/rm -f /run/sshvault.sock /run/sshvault-agent.sock
 Restart=on-failure
 
 # not RuntimeDirectory=: systemd prepares it before every Exec*, and a dead FUSE mount

@@ -10,6 +10,7 @@ use base64::Engine;
 use fuser::{Config, MountOption, Session, SessionACL};
 use zeroize::Zeroizing;
 
+use crate::agent;
 use crate::fs::{self, Shared, State, Unlocked, VaultFs, VaultState};
 use crate::procs::{self, Pidfd};
 use crate::protocol::{self, Request, Response, VaultStatus};
@@ -21,6 +22,7 @@ const PRUNE_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct Options {
     pub socket: PathBuf,
+    pub agent_socket: PathBuf,
     pub mount: PathBuf,
     pub state_dir: PathBuf,
     /// `None` runs as the invoking user, without separation from that user's processes.
@@ -51,6 +53,7 @@ pub fn run(options: &Options) -> Result<()> {
 
     prepare_dirs(options, privileged.as_ref())?;
     let listener = bind_socket(&options.socket, privileged.is_some())?;
+    let agent_listener = bind_socket(&options.agent_socket, privileged.is_some())?;
 
     let state: Shared = Arc::new(Mutex::new(State::new(options.state_dir.clone())));
     let mut config = Config::default();
@@ -107,6 +110,15 @@ pub fn run(options: &Options) -> Result<()> {
             }
         });
     }
+    {
+        let state = state.clone();
+        std::thread::spawn(move || {
+            for stream in agent_listener.incoming().flatten() {
+                let state = state.clone();
+                std::thread::spawn(move || agent::serve(stream, &state));
+            }
+        });
+    }
 
     eprintln!(
         "sshvault: serving {} on {}{}",
@@ -129,6 +141,7 @@ pub fn run(options: &Options) -> Result<()> {
         return Ok(());
     }
     let _ = std::fs::remove_file(&options.socket);
+    let _ = std::fs::remove_file(&options.agent_socket);
     session.umount_and_join().context("unmounting")?;
     Ok(())
 }
@@ -139,8 +152,13 @@ fn prepare_dirs(options: &Options, privileged: Option<&Account>) -> Result<()> {
         .socket
         .parent()
         .context("socket path has no parent directory")?;
+    let agent_dir = options
+        .agent_socket
+        .parent()
+        .context("agent socket path has no parent directory")?;
     for (dir, mode) in [
         (socket_dir, public),
+        (agent_dir, public),
         (options.mount.as_path(), public),
         (options.state_dir.as_path(), 0o700),
     ] {
@@ -151,12 +169,14 @@ fn prepare_dirs(options: &Options, privileged: Option<&Account>) -> Result<()> {
             .with_context(|| format!("creating {}", dir.display()))?;
     }
     if let Some(account) = privileged {
-        let meta = std::fs::metadata(socket_dir)?;
-        if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
-            bail!(
-                "{} must be owned by root and writable only by root",
-                socket_dir.display()
-            );
+        for dir in [socket_dir, agent_dir] {
+            let meta = std::fs::metadata(dir)?;
+            if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+                bail!(
+                    "{} must be owned by root and writable only by root",
+                    dir.display()
+                );
+            }
         }
         std::os::unix::fs::chown(&options.state_dir, Some(account.uid), Some(account.gid))
             .with_context(|| {
@@ -389,6 +409,12 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                     name: v.name.clone(),
                     unlocked_by: v.unlocked_ancestor(peer.pid),
                     sessions: v.sessions.len(),
+                    notes: v
+                        .open
+                        .as_ref()
+                        .and_then(|open| agent::policy_of(&open.tree).err())
+                        .map(|e| vec![format!("{e:#}; no key may be forwarded")])
+                        .unwrap_or_default(),
                 })
                 .collect()
         })
