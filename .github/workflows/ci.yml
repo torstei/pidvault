@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -87,7 +88,7 @@ jobs:
           mkdir -p ~/apt-archives/partial
           sudo apt-get $APT_OPTIONS update
           sudo apt-get $APT_OPTIONS -o Dir::Cache::archives="$HOME/apt-archives" \
-            install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage gpgv ubuntu-cloudimage-keyring
+            install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage gpgv ubuntu-cloudimage-keyring apt-utils
           sudo chown -R "$USER" ~/apt-archives
       - name: Keep downloaded packages
         if: steps.apt-cache.outputs.cache-hit != 'true'

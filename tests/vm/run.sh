@@ -1,7 +1,8 @@
 #!/bin/bash
 # Builds the .deb, installs it in a throwaway Ubuntu VM and runs guest-tests.sh there as root.
-# Needs read/write access to /dev/kvm, qemu-system-x86_64, qemu-img, genisoimage, gpgv, curl
-# and cargo-deb. No sudo. The verified cloud image is cached; every run boots a fresh overlay.
+# Needs read/write access to /dev/kvm, qemu-system-x86_64, qemu-img, genisoimage, gpg, gpgv,
+# apt-ftparchive, curl and cargo-deb. No sudo. The verified cloud image is cached; every run
+# boots a fresh overlay.
 #
 #   SSHVAULT_VM_KEEP=1     keep the work directory (console log, results, disk) afterwards
 #   SSHVAULT_VM_REFRESH=1  download and verify the cloud image again
@@ -50,6 +51,18 @@ trap cleanup EXIT
 
 mkdir "$WORK/seed"
 cp "$DEB" "$WORK/seed/sshvault.deb"
+
+# a repository signed with a throwaway key, installed from as users would, and a second
+# key it must not be accepted under
+export GNUPGHOME="$WORK/gnupg"
+mkdir -m 700 "$GNUPGHOME"
+for name in "sshvault test" "someone else"; do
+    gpg --batch --quiet --pinentry-mode loopback --passphrase '' \
+        --quick-gen-key "$name <test@invalid>" ed25519 sign never
+done
+mkdir "$WORK/debs" && cp "$DEB" "$WORK/debs/"
+scripts/build-apt-repo.sh "$WORK/debs" "$WORK/seed/repo" "sshvault test" >/dev/null
+gpg --armor --export "someone else" > "$WORK/seed/other.asc"
 cp tests/vm/guest-tests.sh "$WORK/seed/"
 printf 'instance-id: sshvault-test\nlocal-hostname: sshvault-test\n' > "$WORK/seed/meta-data"
 cat > "$WORK/seed/user-data" <<'EOF'

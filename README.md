@@ -56,10 +56,31 @@ to get right:
   and `known_hosts` stay editable in place.
 - **Root.** Anything that is, or can become, root is out of scope.
 
+## Installing
+
+For Ubuntu 24.04 or later, on amd64, from the project's signed apt repository:
+
+```sh
+sudo curl -fsSLo /etc/apt/keyrings/sshvault.asc https://torstei.github.io/sshvault/sshvault.asc
+echo "deb [signed-by=/etc/apt/keyrings/sshvault.asc] https://torstei.github.io/sshvault stable main" \
+  | sudo tee /etc/apt/sources.list.d/sshvault.list
+sudo apt update && sudo apt install sshvault
+```
+
+The repository is signed with the key with fingerprint
+`D1434A919B60EEC6384F3CB716EFFB5096BD7539`; check it with
+`gpg --show-keys /etc/apt/keyrings/sshvault.asc` before trusting it. The same key is in
+this repository as `packaging/sshvault-apt.asc`. Each `.deb` on the
+[releases page](https://github.com/torstei/sshvault/releases) also carries a build
+attestation: `gh attestation verify sshvault_*.deb --repo torstei/sshvault` shows that it
+was built by this repository's release workflow, and from which commit.
+
+Installing starts the service. Upgrading restarts it, which locks every shell.
+
 ## How it is meant to be used
 
 ```sh
-sudo apt install ./sshvault_*.deb           # once per machine; starts the service
+sudo apt install sshvault                   # once per machine; see Installing
 sshvault create                             # once: asks for a passphrase, unlocks this shell
 $EDITOR /run/sshvault/default/config        # starts as a commented example
 sshvault stub                               # once: put its output at the top of ~/.ssh/config
@@ -240,7 +261,13 @@ whose processes run under real `systemd --user` managers, then upgrades, removes
 it. Results come back as TAP on the VM's second serial port.
 
 `packaging/` has the systemd unit and the `sysusers.d` entry for the `sshvault` account.
-Installing or upgrading the package restarts the service, which locks every shell.
+
+To release, bump the version in `Cargo.toml`, add it to `CHANGELOG.md`, merge, and push a
+tag `vX.Y.Z` on `main`. The release workflow runs the full test suite, builds the package
+with a build attestation, and waits for approval in the `release` environment before it
+creates the GitHub release, signs the apt repository (built by
+`scripts/build-apt-repo.sh` from every released package) and publishes it on GitHub Pages.
+Only that approved job can reach the signing key.
 
 ## License
 
