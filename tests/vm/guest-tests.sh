@@ -107,6 +107,15 @@ check "naming the key explicitly does not help" refused as alice ssh -F /dev/nul
     -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -i /run/sshvault/self/id_vm alice@127.0.0.1 true
 
+check "export needs an unlocked shell" refused as alice sshvault export /tmp/alice-denied.age
+check "alice exports her vault from an unlocked shell" unlocked alice 'sshvault export /tmp/alice-export.age'
+useradd --create-home --shell /bin/bash carol
+install -o carol -m 600 /tmp/alice-export.age /tmp/carol-import.age
+check "carol imports alice's export" as carol sh -c \
+    'echo alice-pass | sshvault import --passphrase-stdin /tmp/carol-import.age'
+check "the imported vault works for a user with another name" as carol sh -c \
+    'echo alice-pass | sshvault unlock --passphrase-stdin >/dev/null && grep -q id_vm /run/sshvault/self/config'
+
 # an orphaned client is adopted by alice's systemd --user, the subreaper of her whole login
 as alice mkfifo /tmp/orphan-fifo
 in_manager alice --property=ExitType=cgroup --unit=orphan-test \

@@ -13,15 +13,19 @@ use crate::{procs, users};
 /// cannot be told apart from an impostor, so this exists for tests only.
 pub const ALLOW_SAME_UID_ENV: &str = "SSHVAULT_INSECURE_ALLOW_SAME_UID_DAEMON";
 
-const MAX_REQUEST: u64 = 4 * 1024 * 1024;
+const MAX_REQUEST: u64 = 8 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// `vault` is a base64 age file; the daemon stores it but cannot read it.
-    Create {
+    /// Stores `vault`, a base64 age file, after checking that `passphrase` opens it.
+    /// Replacing an existing vault needs an unlocked caller.
+    Import {
         vault: String,
+        passphrase: Zeroizing<String>,
     },
+    /// Returns the stored vault, still encrypted, to an unlocked caller.
+    Export,
     Unlock {
         passphrase: Zeroizing<String>,
     },
@@ -41,6 +45,9 @@ pub struct Response {
     /// Unlocked shells of the caller's user.
     pub sessions: usize,
     pub has_vault: bool,
+    /// The base64 age file, in reply to `Export`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<String>,
 }
 
 pub fn call(socket: &Path, request: &Request) -> Result<Response> {

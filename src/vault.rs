@@ -213,22 +213,41 @@ pub fn check_sealed(ciphertext: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Writes `ciphertext` as the vault in one atomic step; a vault already there is kept
+/// as `<vault>.previous`, replacing any older one.
 pub fn store(vault: &Path, ciphertext: &[u8]) -> Result<()> {
-    if let Some(parent) = vault.parent() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)?;
-    }
+    let dir = vault
+        .parent()
+        .context("vault path has no parent directory")?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let staged = sibling(vault, ".new");
+    let _ = std::fs::remove_file(&staged);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(vault)
-        .with_context(|| format!("creating {}", vault.display()))?;
+        .open(&staged)
+        .with_context(|| format!("creating {}", staged.display()))?;
     file.write_all(ciphertext)?;
     file.sync_all()?;
+    if vault.exists() {
+        let previous = sibling(vault, ".previous");
+        let _ = std::fs::remove_file(&previous);
+        std::fs::hard_link(vault, &previous)
+            .with_context(|| format!("keeping {}", previous.display()))?;
+    }
+    std::fs::rename(&staged, vault).with_context(|| format!("replacing {}", vault.display()))?;
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 #[cfg(test)]
@@ -294,13 +313,19 @@ mod tests {
     }
 
     #[test]
-    fn store_never_overwrites() {
+    fn store_replaces_atomically_and_keeps_the_previous_vault() {
         let src = sample_dir();
         let out = tempfile::tempdir().unwrap();
         let vault = out.path().join("vault.age");
-        let sealed = seal(src.path(), secret("pw"), Some(4)).unwrap().0;
-        store(&vault, &sealed).unwrap();
-        assert!(store(&vault, &sealed).is_err());
+        let first = seal(src.path(), secret("one"), Some(4)).unwrap().0;
+        let second = seal(src.path(), secret("two"), Some(4)).unwrap().0;
+        store(&vault, &first).unwrap();
+        store(&vault, &second).unwrap();
+        assert!(open(&vault, secret("two")).is_ok());
+        assert!(open(&out.path().join("vault.age.previous"), secret("one")).is_ok());
+        assert!(!out.path().join("vault.age.new").exists());
+        let mode = std::fs::metadata(&vault).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
