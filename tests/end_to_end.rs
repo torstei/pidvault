@@ -372,7 +372,9 @@ fn passwd_changes_the_passphrase_and_keeps_unsaved_edits() {
     assert!(o.status.success(), "{o:?}");
     f.wait_until_locked();
 
-    let old = f.outsider(&format!("echo '{PASSPHRASE}' | \"$SV\" unlock --passphrase-stdin"));
+    let old = f.outsider(&format!(
+        "echo '{PASSPHRASE}' | \"$SV\" unlock --passphrase-stdin"
+    ));
     assert!(stderr_of(&old).contains("wrong passphrase"), "{old:?}");
     std::thread::sleep(Duration::from_millis(1200));
     let o = f.outsider(
