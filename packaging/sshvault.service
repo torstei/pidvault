@@ -1,0 +1,34 @@
+[Unit]
+Description=Per-shell access to encrypted SSH configuration
+After=local-fs.target systemd-sysusers.service
+
+[Service]
+Type=exec
+# starts as root to mount for every user, then drops to the sshvault account itself
+# a mount left without its daemon makes the ssh_config Include fail for every host
+ExecStartPre=-/usr/bin/umount --lazy /run/sshvault
+ExecStart=/usr/bin/sshvault daemon
+ExecStopPost=-/usr/bin/umount --lazy /run/sshvault
+ExecStopPost=-/usr/bin/rm -f /run/sshvault.sock
+Restart=on-failure
+
+# not RuntimeDirectory=: systemd prepares it before every Exec*, and a dead FUSE mount
+# there (ENOTCONN) would stop even the umount below from running
+# not StateDirectory=: without User= systemd would chown it back to root on every start
+# decrypted vaults are held in locked memory, up to 4 MiB per user
+LimitMEMLOCK=64M
+
+# Nothing that gives the service its own mount namespace (PrivateTmp, ProtectSystem,
+# ProtectHome, ReadWritePaths, ProtectKernel*, ...): the mount would be invisible to users.
+# ProtectProc= must stay at its default: callers are identified through /proc.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

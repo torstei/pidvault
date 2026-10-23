@@ -1,0 +1,32 @@
+[package]
+name = "sshvault"
+version = "0.1.0"
+edition = "2024"
+description = "Per-shell access to an encrypted SSH configuration directory"
+
+[dependencies]
+age = "0.12.1"
+anyhow = "1.0.104"
+base64 = "0.23.1"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+fuser = { version = "0.18.0", default-features = false }
+libc = "0.2.191"
+rpassword = "7.5.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tar = "0.4.46"
+zeroize = { version = "1.9.1", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[package.metadata.deb]
+extended-description = """\
+A shell that has run `sshvault unlock`, and every process it starts, sees the \
+decrypted SSH config and keys under /run/sshvault/self. Every other process of \
+the same user sees an empty directory."""
+section = "net"
+depends = "$auto"
+assets = [["target/release/sshvault", "usr/bin/", "755"], ["README.md", "usr/share/doc/sshvault/README.md", "644"]]
+maintainer-scripts = "packaging"
+systemd-units = { unit-scripts = "packaging", enable = true, start = true }
