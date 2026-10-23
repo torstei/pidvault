@@ -220,18 +220,46 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     }
                     sealed
                 }
-                None => vault::encrypt(&tree::Tree::empty().to_tar()?, secret, work_factor)?,
+                None => {
+                    let config = starter_config(&cli.mount.join(&vault), &cli.agent_socket);
+                    let failed = |e| anyhow::anyhow!("cannot prepare the starter config: {e:?}");
+                    let mut tree = tree::Tree::empty();
+                    let ino = tree
+                        .create_file(tree::ROOT, std::ffi::OsStr::new("config"), 0o600)
+                        .map_err(failed)?;
+                    tree.write(ino, 0, config.as_bytes()).map_err(failed)?;
+                    vault::encrypt(&tree.to_tar()?, secret, work_factor)?
+                }
             };
             let data = base64::engine::general_purpose::STANDARD.encode(sealed);
+            let dir = cli.mount.join(&vault);
             report(protocol::call(
                 &cli.socket,
                 &Request::Import {
-                    vault,
+                    vault: vault.clone(),
                     data,
                     passphrase,
                     unlock: !no_unlock,
                 },
-            )?)
+            )?)?;
+            if no_unlock {
+                println!("\nunlock it with:  sshvault unlock {vault}");
+            }
+            println!(
+                "\nPut keys in it, which can then be used but never read:\n\
+                 \x20   ssh-keygen -t ed25519 -N '' -f {dir}/id_ed25519\n\
+                 \x20   sshvault add-key{flag} ~/.ssh/SOME_KEY\n\
+                 Describe your hosts in {dir}/config, then use it either through the block\n\
+                 `sshvault stub` prints for the top of ~/.ssh/config, or directly:\n\
+                 \x20   ssh -F {dir}/config HOST",
+                dir = dir.display(),
+                flag = if vault == fs::DEFAULT_VAULT {
+                    String::new()
+                } else {
+                    format!(" --vault {vault}")
+                },
+            );
+            Ok(ExitCode::SUCCESS)
         }
         Command::Unlock {
             vault,
@@ -405,6 +433,27 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// What an empty vault starts with: enough for `ssh -F` to sign through the vault agent.
+fn starter_config(dir: &Path, agent_socket: &Path) -> String {
+    format!(
+        "# Readable only in shells that unlocked this vault. Used through the sshvault block\n\
+         # in ~/.ssh/config, or directly:  ssh -F {dir}/config HOST\n\
+         \n\
+         # Keys in this vault cannot be read, only used through the vault agent.\n\
+         IdentityAgent {agent}\n\
+         \n\
+         # Host example\n\
+         #     HostName example.com\n\
+         #     User me\n\
+         #     IdentityFile {dir}/id_ed25519\n\
+         #     UserKnownHostsFile {dir}/known_hosts\n\
+         #     # through a jump host, without forwarding your agent to it\n\
+         #     ProxyJump jump.example.com\n",
+        dir = dir.display(),
+        agent = agent_socket.display(),
+    )
 }
 
 fn print_status(reply: &Response) {

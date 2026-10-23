@@ -943,7 +943,7 @@ fn create_makes_an_empty_vault_and_unlocks_its_shell() {
     let o = f.outsider(&format!(
         "echo '{PASSPHRASE}' | \"$SV\" create --passphrase-stdin --work-factor 10 >/dev/null && ls -A \"$MNT\" && echo 'Host n' > \"$MNT/config\" && cat \"$MNT/config\""
     ));
-    assert_eq!(stdout(&o), "Host n\n", "{o:?}");
+    assert_eq!(stdout(&o), "config\nHost n\n", "{o:?}");
     assert_eq!(stdout(&f.outsider("cat \"$MNT/config\"")), "");
     f.wait_until_locked();
     assert_eq!(stdout(&f.unlocked_shell("cat \"$MNT/config\"")), "Host n\n");
@@ -1168,4 +1168,44 @@ fn add_key_takes_an_unprotected_key_into_a_named_vault() {
 
 fn stderr_of(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+#[test]
+fn an_empty_vault_starts_with_a_config_that_names_the_agent() {
+    let Some(f) = Fixture::start_empty() else {
+        return;
+    };
+    let o = f.outsider(&format!(
+        "echo '{PASSPHRASE}' | \"$SV\" create --passphrase-stdin --work-factor 10 >/dev/null && \
+         ssh -G -F \"$MNT/config\" anyhost | grep '^identityagent '; grep -c '^IdentityAgent' \"$MNT/config\""
+    ));
+    assert_eq!(
+        stdout(&o),
+        format!("identityagent {}\n1\n", f.path("agent.sock").display()),
+        "{o:?}"
+    );
+}
+
+#[test]
+fn ssh_dash_f_on_the_vault_config_works_without_the_stub() {
+    let keys = tempfile::tempdir().unwrap();
+    let key = keys.path().join("id_test");
+    keygen_at(&key, "", "vault-key");
+    let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+    let Some(sshd) = start_sshd(keys.path(), &public) else {
+        return;
+    };
+    let Some(f) = Fixture::start_empty() else {
+        return;
+    };
+    let user = std::env::var("USER").unwrap();
+    let o = f.outsider(&format!(
+        r#"echo '{PASSPHRASE}' | "$SV" create --passphrase-stdin --work-factor 10 >/dev/null || exit 1
+           "$SV" add-key '{key}' </dev/null >/dev/null || exit 1
+           printf 'Host vaulthost\n  HostName 127.0.0.1\n  Port {port}\n  User {user}\n  IdentityFile %s/id_test\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n' "$MNT" >> "$MNT/config"
+           ssh -F "$MNT/config" vaulthost echo logged-in"#,
+        key = key.display(),
+        port = sshd.port,
+    ));
+    assert_eq!(stdout(&o), "logged-in\n", "{o:?}");
 }
