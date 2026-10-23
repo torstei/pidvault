@@ -47,14 +47,17 @@ impl Guesses {
             Ok(_) => *attempts = Attempts::default(),
             Err(e) if e.downcast_ref::<WrongPassphrase>().is_some() => {
                 attempts.failures += 1;
-                let delay =
-                    Duration::from_secs(1u64 << (attempts.failures - 1).min(5)).min(MAX_DELAY);
-                attempts.not_before = Some(Instant::now() + delay);
+                attempts.not_before = Some(Instant::now() + delay_after(attempts.failures));
             }
             Err(_) => {}
         }
         result
     }
+}
+
+/// How long the next check waits after `failures` wrong passphrases in a row.
+fn delay_after(failures: u32) -> Duration {
+    Duration::from_secs(1u64 << failures.saturating_sub(1).min(5)).min(MAX_DELAY)
 }
 
 static SCRYPT: Mutex<()> = Mutex::new(());
@@ -137,24 +140,21 @@ mod tests {
     }
 
     #[test]
-    fn the_wait_doubles_and_a_right_passphrase_resets_it() {
+    fn the_wait_doubles_up_to_half_a_minute() {
+        let waits: Vec<u64> = (1..=8).map(|n| delay_after(n).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30, 30]);
+    }
+
+    #[test]
+    fn a_right_passphrase_resets_the_count() {
         let guesses = Guesses::default();
-        for expected in [1, 2, 4] {
-            assert!(guesses.check(1, wrong).is_err());
-            let slot = lock(&guesses.users).get(&1).unwrap().clone();
-            let wait = lock(&slot)
-                .not_before
-                .unwrap()
-                .saturating_duration_since(Instant::now());
-            assert!(
-                wait.as_secs_f64() > expected as f64 - 0.5 && wait.as_secs() <= expected,
-                "{wait:?}"
-            );
-            lock(&slot).not_before = None;
-        }
-        assert!(guesses.check(1, || Ok(())).is_ok());
+        assert!(guesses.check(1, wrong).is_err());
         let slot = lock(&guesses.users).get(&1).unwrap().clone();
+        assert_eq!(lock(&slot).failures, 1);
+        lock(&slot).not_before = None;
+        assert!(guesses.check(1, || Ok(())).is_ok());
         assert_eq!(lock(&slot).failures, 0);
+        assert!(lock(&slot).not_before.is_none());
     }
 
     #[test]

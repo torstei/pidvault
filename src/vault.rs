@@ -332,11 +332,12 @@ mod tests {
             })
             .collect::<String>()
             .into_bytes();
-        let started = std::time::Instant::now();
+        // the passphrase is right: without the limit this would succeed after the work
         let err = decrypt(&sealed, secret("pw")).err().unwrap();
-        assert!(format!("{err}").contains("scrypt cost"), "{err:#}");
-        // doing the work at 2^21 would take over a minute in a debug build
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            format!("{err}").contains(&format!("scrypt cost 2^{}", MAX_WORK_FACTOR + 1)),
+            "{err:#}"
+        );
     }
 
     #[test]
