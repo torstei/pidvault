@@ -335,7 +335,8 @@ mod tests {
         let started = std::time::Instant::now();
         let err = decrypt(&sealed, secret("pw")).err().unwrap();
         assert!(format!("{err}").contains("scrypt cost"), "{err:#}");
-        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        // doing the work at 2^21 would take over a minute in a debug build
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
