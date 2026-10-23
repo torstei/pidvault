@@ -27,8 +27,10 @@ None of this is a bug. On Unix, the boundary is the user id, and everything you 
 ## What sshvault does instead
 
 Access is granted per shell, not per login. A shell that has run `sshvault unlock`, and
-every process it starts, sees your decrypted `config` and keys under `/run/sshvault/self/`.
-Every other process running as you sees an empty directory. There is no agent socket to
+every process it starts, sees your decrypted `config` and keys under
+`/run/sshvault/default/`. Every other process running as you sees an empty directory. With
+several vaults, each shell sees only the ones it unlocked: one shell can have your GitHub
+key and another your production keys. There is no agent socket to
 find, nothing to borrow, and neither keys nor config sit in your home directory for other
 processes to read or rewrite.
 
@@ -47,7 +49,7 @@ to get right:
   `~/.local/bin`, `~/.bashrc` and the other files your shell trusts. An alias, a function
   or a binary planted there runs inside the next shell you unlock, and sshvault cannot
   tell it from the real thing.
-- **The `Include` line in `~/.ssh/config`.** It is editable the same way, and an entry
+- **The sshvault block in `~/.ssh/config`.** It is editable the same way, and an entry
   placed above it wins. `sudo chattr +i ~/.ssh ~/.ssh/config` stops that; `authorized_keys`
   and `known_hosts` stay editable in place.
 - **Root.** Anything that is, or can become, root is out of scope.
@@ -57,7 +59,7 @@ to get right:
 ```sh
 sudo apt install ./sshvault_*.deb           # once per machine; starts the service
 sshvault create                             # once: asks for a passphrase, unlocks this shell
-$EDITOR /run/sshvault/self/config           # fill the vault from this shell
+$EDITOR /run/sshvault/default/config        # fill the vault from this shell
 sshvault stub                               # once: put its output at the top of ~/.ssh/config
 sshvault unlock                             # in each further shell that should have access
 ```
@@ -66,24 +68,49 @@ sshvault unlock                             # in each further shell that should 
 `sshvault create --from DIR` starts from the files in a directory instead of an empty
 vault. Keys you copy in from `~/.ssh` have been readable by every process you ran so far:
 the clean move is to generate new ones straight into the vault, e.g.
-`ssh-keygen -t ed25519 -f /run/sshvault/self/id_ed25519`, and retire the old ones.
+`ssh-keygen -t ed25519 -f /run/sshvault/default/id_ed25519`, and retire the old ones.
 
-`sshvault stub` prints an `Include` line that must sit at the top of `~/.ssh/config`. In an
-unlocked shell the vault's entries take precedence; everywhere else the include resolves
-to nothing and your existing config applies as before. Migrate one host at a time.
-`~/.ssh` itself, `authorized_keys` and inbound SSH are untouched.
+`sshvault stub` prints a block that must sit at the top of `~/.ssh/config`:
+
+```
+Match exec "/usr/bin/sshvault status --quiet"
+    AddKeysToAgent no
+    Include /run/sshvault/*/config
+```
+
+In a shell with a vault unlocked, the vaults' entries take precedence, and no key is
+handed to an agent, whatever a later `AddKeysToAgent yes` says: an agent would make the
+keys available to every process again. Everywhere else the block does nothing and your
+existing config applies as before, so you can migrate one host at a time. `~/.ssh`
+itself, `authorized_keys` and inbound SSH are untouched. `ssh-add` on a vault key would
+still hand it over; don't.
 
 An unlocked shell, and everything it starts, can change the vault like any directory:
 editors, `sed -i`, `ssh-keygen` and `ssh` itself all work. Changes are saved on `fsync`,
 when a written file is closed, on a rename, and otherwise within a second.
 
 Inside the vault, refer to files through the mount, e.g.
-`IdentityFile /run/sshvault/self/id_ed25519` and
-`UserKnownHostsFile /run/sshvault/self/known_hosts`. Keep `ControlPath` elsewhere
+`IdentityFile /run/sshvault/default/id_ed25519` and
+`UserKnownHostsFile /run/sshvault/default/known_hosts`. Keep `ControlPath` elsewhere
 (`$XDG_RUNTIME_DIR`): unix sockets cannot live on the mount. A vault holds up to 4 MiB.
 
-Other commands: `sshvault status`, `sshvault lock`, `sshvault lock --all`, and
-`sshvault passwd` to change the passphrase.
+Other commands: `sshvault status`, `sshvault lock` (this shell) and `sshvault lock --all`
+(every shell), and `sshvault passwd` to change a passphrase.
+
+### More than one vault
+
+```sh
+sshvault create prod                        # its own key, and its own passphrase if you like
+sshvault unlock prod                        # in the shell that should have it
+$EDITOR /run/sshvault/prod/config
+sshvault lock prod                          # lock just that one
+```
+
+Every command takes a vault name and defaults to `default`; `export` and `import` take
+`--vault NAME`. Vaults are included in alphabetical order and ssh uses the first value it
+finds for each setting, so a `Host *` block in one vault applies to every host in shells
+that have it unlocked. Paths inside a vault contain its name: renaming one is not
+supported.
 
 ### Backups and moving to another machine
 
@@ -97,7 +124,7 @@ passphrase, holding a tar archive of the vault (`age -d backup.age | tar -t` lis
 Only an unlocked shell may export, so your other processes cannot even get a copy to try
 passphrases against. `import` checks the passphrase before storing anything. Replacing an
 existing vault also needs an unlocked shell. The old one is kept as
-`vault.sshvault.previous`, where an administrator can restore it, and shells that are
+`<name>.sshvault.previous`, where an administrator can restore it, and shells that are
 already unlocked see the new contents at once.
 
 ## How it works
@@ -108,18 +135,18 @@ already unlocked see the new contents at once.
   place a socket or file where it lives (its socket is `/run/sshvault.sock`).
 - The client refuses a daemon that runs as your own uid or whose socket directory is not
   root's: such a daemon could be any of your processes, waiting for your passphrase.
-- Each vault is one file, `/var/lib/sshvault/<uid>/vault.sshvault`, readable only by the
+- Each vault is one file, `/var/lib/sshvault/<uid>/<name>.sshvault`, readable only by the
   daemon. It holds a random 256-bit key K encrypted with your passphrase, and the contents
   encrypted with K, both in `age` passphrase format; one file, so a save replaces both in
   a single rename. Unlocking costs one scrypt run on your passphrase; saving costs almost
   nothing, since K needs no slow key derivation. Because only someone holding K can
   produce contents that decrypt with it, nobody without K can plant a vault.
-- Every FUSE request carries the caller's pid and uid. Like `/proc/self`, `self` is the
-  same path for everyone: each user gets their own directory there (a separate inode, owned
-  by that user, mode 0700), and its contents only in a process that is, or descends from,
-  an unlocked shell of that user. Vault paths therefore contain no username, so a vault
-  works unchanged on machines where your account is named differently. Shells are held
-  by pidfd, so a reused pid inherits nothing.
+- Every FUSE request carries the caller's pid and uid. Like `/proc/self`, a vault's path is
+  the same for everyone: each user gets their own directory there (a separate inode, owned
+  by that user, mode 0700), listed only to them, and its contents only in a process that
+  is, or descends from, a shell of that user that unlocked that vault. Vault paths
+  therefore contain no username, so a vault works unchanged on machines where your account
+  is named differently. Shells are held by pidfd, so a reused pid inherits nothing.
 - Kernel caching is off (zero TTLs, direct I/O), so nothing seen by one process is
   served to another from cache.
 - Decrypted data and K exist only in the daemon's memory, in buffers locked against swap

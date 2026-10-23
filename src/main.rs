@@ -33,7 +33,7 @@ struct Cli {
         default_value = "/run/sshvault.sock"
     )]
     socket: PathBuf,
-    /// Where the daemon mounts; your files appear under `self` inside it
+    /// Where the daemon mounts; each of your vaults is a directory inside it
     #[arg(
         long,
         global = true,
@@ -63,8 +63,10 @@ enum Command {
         #[arg(long, hide = true)]
         work_factor: Option<u8>,
     },
-    /// Create your vault, empty or from a directory, and unlock the calling shell
+    /// Create a vault, empty or from a directory, and unlock it for the calling shell
     Create {
+        #[arg(default_value = fs::DEFAULT_VAULT)]
+        vault: String,
         /// Start from the files in this directory instead of an empty vault
         #[arg(long)]
         from: Option<PathBuf>,
@@ -78,47 +80,58 @@ enum Command {
         #[arg(long, hide = true)]
         work_factor: Option<u8>,
     },
-    /// Write your vault, encrypted with its passphrase, to FILE (`-` for stdout);
-    /// needs an unlocked shell
-    Export {
-        file: PathBuf,
+    /// Give the calling shell and its descendants access to a vault
+    Unlock {
+        #[arg(default_value = fs::DEFAULT_VAULT)]
+        vault: String,
         /// Read the passphrase from the first line of stdin
         #[arg(long)]
         passphrase_stdin: bool,
     },
-    /// Change the passphrase of your vault
+    /// Revoke the calling shell's access to a vault, or to all of them
+    Lock {
+        vault: Option<String>,
+        /// Revoke access for all of your shells
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show your vaults; exit 0 if the calling shell has the vault (or any) unlocked
+    Status {
+        vault: Option<String>,
+        /// Print nothing, not even errors
+        #[arg(long, short)]
+        quiet: bool,
+    },
+    /// Change the passphrase of a vault
     Passwd {
+        #[arg(default_value = fs::DEFAULT_VAULT)]
+        vault: String,
         /// Read the old and the new passphrase from the first two lines of stdin
         #[arg(long)]
         passphrase_stdin: bool,
     },
-    /// Make an exported vault yours, and unlock the calling shell: on a new machine, or
-    /// replacing your current one (which needs an unlocked shell and is kept as a backup)
+    /// Write a vault, encrypted with its passphrase, to FILE (`-` for stdout); needs the
+    /// vault unlocked in the calling shell
+    Export {
+        file: PathBuf,
+        #[arg(long, default_value = fs::DEFAULT_VAULT)]
+        vault: String,
+        /// Read the passphrase from the first line of stdin
+        #[arg(long)]
+        passphrase_stdin: bool,
+    },
+    /// Make an exported vault yours and unlock it for the calling shell: on a new
+    /// machine, or replacing one (which needs it unlocked, and is kept as a backup)
     Import {
         file: PathBuf,
+        #[arg(long, default_value = fs::DEFAULT_VAULT)]
+        vault: String,
         /// Leave the calling shell locked
         #[arg(long)]
         no_unlock: bool,
         /// Read the file's passphrase from the first line of stdin
         #[arg(long)]
         passphrase_stdin: bool,
-    },
-    /// Give the calling shell and its descendants access to your vault
-    Unlock {
-        /// Read the passphrase from the first line of stdin
-        #[arg(long)]
-        passphrase_stdin: bool,
-    },
-    /// Revoke access for the calling shell
-    Lock {
-        /// Revoke access for all of your shells
-        #[arg(long)]
-        all: bool,
-    },
-    /// Exit 0 if the calling shell is unlocked, 1 if not
-    Status {
-        #[arg(long, short)]
-        quiet: bool,
     },
     /// Print the lines to put at the top of ~/.ssh/config
     Stub,
@@ -152,19 +165,23 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Create {
+            vault,
             from,
             no_unlock,
             passphrase_stdin,
             work_factor,
         } => {
+            fs::check_vault_name(&vault)?;
             let status = protocol::call(&cli.socket, &Request::Status)?;
-            if status.has_vault {
-                bail!("you already have a vault; to replace it, `sshvault import` an exported one");
+            if status.vault(&vault).is_some() {
+                bail!(
+                    "you already have a vault `{vault}`; to replace it, `sshvault import` an exported one"
+                );
             }
             let passphrase = if passphrase_stdin {
                 passphrase_from_stdin()?
             } else {
-                let first = prompt("New vault passphrase: ")?;
+                let first = prompt(&format!("New passphrase for `{vault}`: "))?;
                 if *first != *prompt("Repeat passphrase: ")? {
                     bail!("passphrases do not match");
                 }
@@ -181,29 +198,75 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
                 None => vault::encrypt(&tree::Tree::empty().to_tar()?, secret, work_factor)?,
             };
-            let vault = base64::engine::general_purpose::STANDARD.encode(sealed);
+            let data = base64::engine::general_purpose::STANDARD.encode(sealed);
             report(protocol::call(
                 &cli.socket,
                 &Request::Import {
                     vault,
+                    data,
                     passphrase,
                     unlock: !no_unlock,
                 },
             )?)
         }
-        Command::Unlock { passphrase_stdin } => {
+        Command::Unlock {
+            vault,
+            passphrase_stdin,
+        } => {
             let passphrase = if passphrase_stdin {
                 passphrase_from_stdin()?
             } else {
-                prompt("Vault passphrase: ")?
+                prompt(&format!("Passphrase for `{vault}`: "))?
             };
             report(protocol::call(
                 &cli.socket,
-                &Request::Unlock { passphrase },
+                &Request::Unlock { vault, passphrase },
+            )?)
+        }
+        Command::Lock { vault, all } => {
+            report(protocol::call(&cli.socket, &Request::Lock { vault, all })?)
+        }
+        Command::Status { vault, quiet } => {
+            let reply = match protocol::call(&cli.socket, &Request::Status) {
+                Ok(reply) => reply,
+                Err(_) if quiet => return Ok(ExitCode::from(2)),
+                Err(e) => return Err(e),
+            };
+            if !quiet {
+                print_status(&reply);
+            }
+            let unlocked = match &vault {
+                Some(name) => reply.vault(name).is_some_and(|v| v.unlocked_by.is_some()),
+                None => reply.any_unlocked(),
+            };
+            Ok(if unlocked {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
+        Command::Passwd {
+            vault,
+            passphrase_stdin,
+        } => {
+            let (old, new) = if passphrase_stdin {
+                (passphrase_from_stdin()?, passphrase_from_stdin()?)
+            } else {
+                let old = prompt(&format!("Current passphrase for `{vault}`: "))?;
+                let new = prompt("New passphrase: ")?;
+                if *new != *prompt("Repeat new passphrase: ")? {
+                    bail!("passphrases do not match");
+                }
+                (old, new)
+            };
+            report(protocol::call(
+                &cli.socket,
+                &Request::Passwd { vault, old, new },
             )?)
         }
         Command::Export {
             file,
+            vault,
             passphrase_stdin,
         } => {
             if file != Path::new("-") && file.exists() {
@@ -212,36 +275,25 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let passphrase = if passphrase_stdin {
                 passphrase_from_stdin()?
             } else {
-                prompt("Vault passphrase: ")?
+                prompt(&format!("Passphrase for `{vault}`: "))?
             };
-            let reply = protocol::call(&cli.socket, &Request::Export { passphrase })?;
+            let reply = protocol::call(&cli.socket, &Request::Export { vault, passphrase })?;
             if !reply.ok {
                 bail!("{}", reply.message);
             }
-            let vault = base64::engine::general_purpose::STANDARD
-                .decode(reply.vault.context("daemon sent no vault")?)
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(reply.data.context("daemon sent no vault")?)
                 .context("daemon sent a malformed vault")?;
-            write_export(&file, &vault)?;
+            write_export(&file, &data)?;
             Ok(ExitCode::SUCCESS)
-        }
-        Command::Passwd { passphrase_stdin } => {
-            let (old, new) = if passphrase_stdin {
-                (passphrase_from_stdin()?, passphrase_from_stdin()?)
-            } else {
-                let old = prompt("Current passphrase: ")?;
-                let new = prompt("New passphrase: ")?;
-                if *new != *prompt("Repeat new passphrase: ")? {
-                    bail!("passphrases do not match");
-                }
-                (old, new)
-            };
-            report(protocol::call(&cli.socket, &Request::Passwd { old, new })?)
         }
         Command::Import {
             file,
+            vault,
             no_unlock,
             passphrase_stdin,
         } => {
+            fs::check_vault_name(&vault)?;
             let ciphertext = read_limited(&file)?;
             vault::check_sealed(&ciphertext)
                 .with_context(|| format!("{} is not an exported vault", file.display()))?;
@@ -250,54 +302,53 @@ fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 prompt(&format!("Passphrase for {}: ", file.display()))?
             };
-            let vault = base64::engine::general_purpose::STANDARD.encode(ciphertext);
+            let data = base64::engine::general_purpose::STANDARD.encode(ciphertext);
             report(protocol::call(
                 &cli.socket,
                 &Request::Import {
                     vault,
+                    data,
                     passphrase,
                     unlock: !no_unlock,
                 },
             )?)
         }
-        Command::Lock { all } => report(protocol::call(&cli.socket, &Request::Lock { all })?),
-        Command::Status { quiet } => {
-            let reply = protocol::call(&cli.socket, &Request::Status)?;
-            if !quiet {
-                match (reply.has_vault, reply.unlocked_by) {
-                    (false, _) => {
-                        println!("no vault yet; create one with `sshvault create --from DIR`")
-                    }
-                    (true, Some(shell)) => {
-                        println!(
-                            "unlocked by shell {shell} ({} of your shells unlocked)",
-                            reply.sessions
-                        )
-                    }
-                    (true, None) => {
-                        println!("locked ({} of your other shells unlocked)", reply.sessions)
-                    }
-                }
-            }
-            Ok(if reply.unlocked_by.is_some() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            })
-        }
         Command::Stub => {
-            println!("{}", stub(&cli.mount));
+            println!("{}", stub(&cli.mount)?);
             Ok(ExitCode::SUCCESS)
         }
     }
 }
 
-fn stub(mount: &Path) -> String {
-    format!(
-        "# sshvault: keep above every Host and Match block so vault entries take precedence\n\
-         Include {}",
-        mount.join(fs::SELF).join("config").display()
-    )
+fn print_status(reply: &Response) {
+    if reply.vaults.is_empty() {
+        println!("no vault yet; create one with `sshvault create`");
+    }
+    for vault in &reply.vaults {
+        match vault.unlocked_by {
+            Some(shell) => println!(
+                "{}: unlocked by shell {shell} ({} of your shells have it unlocked)",
+                vault.name, vault.sessions
+            ),
+            None => println!(
+                "{}: locked here ({} of your other shells have it unlocked)",
+                vault.name, vault.sessions
+            ),
+        }
+    }
+}
+
+fn stub(mount: &Path) -> Result<String> {
+    let exe = std::env::current_exe().context("cannot tell where sshvault is installed")?;
+    Ok(format!(
+        "# sshvault: keep this block above every Host and Match block. In a shell with a vault\n\
+         # unlocked, vault entries take precedence and no key is handed to an agent.\n\
+         Match exec \"{} status --quiet\"\n\
+         \x20   AddKeysToAgent no\n\
+         \x20   Include {}",
+        exe.display(),
+        mount.join("*").join("config").display()
+    ))
 }
 
 fn write_export(file: &Path, vault: &[u8]) -> Result<()> {

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
     Generation, INodeNo, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData,
@@ -25,19 +25,43 @@ const SAVE_DELAY: Duration = Duration::from_secs(1);
 
 const ROOT: u64 = 1;
 
-/// The caller's own directory: the same name for everyone, a different inode per user.
-pub const SELF: &str = "self";
+pub const DEFAULT_VAULT: &str = "default";
 
-/// Inodes are the user's slot (16 bits), the generation of their tree (16 bits) and the
-/// inode within the tree (32 bits). A new generation, after an import, makes inodes from
-/// the old tree resolve to nothing instead of to some other file. The user's directory
-/// itself uses generation 0, so it stays the same across unlocks and imports.
-fn global_ino(slot: u16, generation: u16, local: u64) -> u64 {
-    (u64::from(slot) << 48) | (u64::from(generation) << 32) | local
+const VAULT_SUFFIX: &str = ".sshvault";
+
+/// Inodes are the user's slot (12 bits), the vault's index (8 bits), the generation of
+/// that vault's tree (12 bits) and the inode within the tree (32 bits). A vault's name
+/// is the same path for every user, each getting their own inode there. A new
+/// generation, after an import or a fresh unlock, makes inodes from the old tree
+/// resolve to nothing instead of to some other file; a vault's own directory outlives
+/// its trees and uses generation 0.
+fn global_ino(slot: u16, vault: u8, generation: u16, local: u64) -> u64 {
+    (u64::from(slot) << 52) | (u64::from(vault) << 44) | (u64::from(generation) << 32) | local
 }
 
-fn split_ino(ino: u64) -> (u16, u16, u64) {
-    ((ino >> 48) as u16, (ino >> 32) as u16, ino & 0xffff_ffff)
+fn split_ino(ino: u64) -> (u16, u8, u16, u64) {
+    (
+        (ino >> 52) as u16,
+        (ino >> 44) as u8,
+        ((ino >> 32) & 0xfff) as u16,
+        ino & 0xffff_ffff,
+    )
+}
+
+const MAX_SLOT: usize = 0xfff;
+const MAX_GENERATION: u16 = 0xfff;
+
+pub fn check_vault_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+    if !valid {
+        bail!("vault names are up to 64 letters, digits, '.', '_' or '-', not starting with '.'");
+    }
+    Ok(())
 }
 
 pub struct Unlocked {
@@ -58,16 +82,16 @@ impl Unlocked {
     }
 }
 
-pub struct UserState {
-    pub account: Account,
-    slot: u16,
+pub struct VaultState {
+    pub name: String,
+    index: u8,
     generation: u16,
-    pub vault_path: PathBuf,
+    pub path: PathBuf,
     pub open: Option<Unlocked>,
     pub sessions: Sessions<Pidfd>,
 }
 
-impl UserState {
+impl VaultState {
     pub fn unlocked_ancestor(&self, pid: u32) -> Option<u32> {
         self.sessions.unlocked_ancestor(pid, procs::parent_of)
     }
@@ -78,14 +102,18 @@ impl UserState {
         Some(open)
     }
 
-    pub fn has_vault(&self) -> bool {
-        self.vault_path.exists()
+    pub fn exists(&self) -> bool {
+        self.path.exists()
     }
 
     /// Replaces what is held in memory; inodes of the previous tree stop resolving.
     pub fn hold(&mut self, unlocked: Unlocked) {
         self.open = Some(unlocked);
-        self.generation = self.generation.wrapping_add(1).max(1);
+        self.generation = if self.generation >= MAX_GENERATION {
+            1
+        } else {
+            self.generation + 1
+        };
     }
 
     fn mark_changed(&mut self) {
@@ -105,7 +133,7 @@ impl UserState {
             wrapped_key: open.wrapped_key.clone(),
             contents: open.key.seal_tree(&open.tree)?,
         };
-        stored.write(&self.vault_path, false)?;
+        stored.write(&self.path, false)?;
         open.changed = None;
         Ok(())
     }
@@ -123,10 +151,111 @@ impl UserState {
         match self.save() {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("sshvault: saving the vault of {}: {e:#}", self.account.name);
+                eprintln!("sshvault: saving {}: {e:#}", self.path.display());
                 false
             }
         }
+    }
+
+    /// Saves after a moment's quiet, and drops the decrypted tree once no shell is left
+    /// to use it. A tree that cannot be saved is kept rather than lost.
+    fn prune(&mut self) {
+        self.sessions.prune();
+        let idle = self
+            .open
+            .as_ref()
+            .and_then(|o| o.changed)
+            .is_some_and(|t| t.elapsed() >= SAVE_DELAY);
+        if (idle || self.sessions.is_empty()) && self.save_logged() && self.sessions.is_empty() {
+            self.open = None;
+        }
+    }
+}
+
+pub struct UserState {
+    pub account: Account,
+    slot: u16,
+    dir: PathBuf,
+    vaults: Vec<VaultState>,
+}
+
+impl UserState {
+    fn new(account: Account, slot: u16, dir: PathBuf) -> UserState {
+        // a vault stored before vaults had names becomes the default one
+        let unnamed = dir.join("vault.sshvault");
+        let default = dir.join(format!("{DEFAULT_VAULT}{VAULT_SUFFIX}"));
+        if unnamed.exists() && !default.exists() {
+            let _ = std::fs::rename(&unnamed, &default);
+        }
+        let mut user = UserState {
+            account,
+            slot,
+            dir,
+            vaults: Vec::new(),
+        };
+        user.discover();
+        user
+    }
+
+    /// Registers vaults present on disk, so that the mount lists them.
+    fn discover(&mut self) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                e.file_name()
+                    .to_str()?
+                    .strip_suffix(VAULT_SUFFIX)
+                    .map(str::to_owned)
+            })
+            .filter(|name| check_vault_name(name).is_ok())
+            .collect();
+        names.sort();
+        for name in names {
+            let _ = self.vault_mut(&name);
+        }
+    }
+
+    pub fn vault(&self, name: &str) -> Option<&VaultState> {
+        self.vaults.iter().find(|v| v.name == name)
+    }
+
+    /// The vault called `name`, known from now on whether or not it exists yet.
+    pub fn vault_mut(&mut self, name: &str) -> Result<&mut VaultState> {
+        check_vault_name(name)?;
+        if let Some(i) = self.vaults.iter().position(|v| v.name == name) {
+            return Ok(&mut self.vaults[i]);
+        }
+        let Ok(index) = u8::try_from(self.vaults.len() + 1) else {
+            bail!("too many vaults");
+        };
+        self.vaults.push(VaultState {
+            name: name.to_owned(),
+            index,
+            generation: 1,
+            path: self.dir.join(format!("{name}{VAULT_SUFFIX}")),
+            open: None,
+            sessions: Sessions::new(),
+        });
+        Ok(self.vaults.last_mut().expect("just pushed"))
+    }
+
+    fn by_index(&self, index: u8) -> Option<&VaultState> {
+        self.vaults.get(usize::from(index).checked_sub(1)?)
+    }
+
+    fn by_index_mut(&mut self, index: u8) -> Option<&mut VaultState> {
+        self.vaults.get_mut(usize::from(index).checked_sub(1)?)
+    }
+
+    pub fn vaults(&self) -> impl Iterator<Item = &VaultState> {
+        self.vaults.iter()
+    }
+
+    pub fn vaults_mut(&mut self) -> impl Iterator<Item = &mut VaultState> {
+        self.vaults.iter_mut()
     }
 }
 
@@ -151,21 +280,14 @@ impl State {
 
     pub fn user_mut(&mut self, uid: u32) -> Option<&mut UserState> {
         if !self.users.contains_key(&uid) {
+            if self.slots.len() >= MAX_SLOT {
+                return None;
+            }
             let account = users::by_uid(uid)?;
-            let slot = u16::try_from(self.slots.len() + 1).ok()?;
             self.slots.push(uid);
-            let vault_path = self.state_dir.join(uid.to_string()).join("vault.sshvault");
-            self.users.insert(
-                uid,
-                UserState {
-                    account,
-                    slot,
-                    generation: 1,
-                    vault_path,
-                    open: None,
-                    sessions: Sessions::new(),
-                },
-            );
+            let slot = self.slots.len() as u16;
+            let dir = self.state_dir.join(uid.to_string());
+            self.users.insert(uid, UserState::new(account, slot, dir));
         }
         self.users.get_mut(&uid)
     }
@@ -174,29 +296,19 @@ impl State {
         self.slots.get(usize::from(slot).checked_sub(1)?).copied()
     }
 
-    /// Saves vaults that have been left alone for a moment, and drops decrypted trees
-    /// once no shell of that user is left to use them. A tree that cannot be saved is
-    /// kept rather than lost; the next round tries again.
     pub fn prune(&mut self) {
         for user in self.users.values_mut() {
-            user.sessions.prune();
-            let idle = user
-                .open
-                .as_ref()
-                .and_then(|o| o.changed)
-                .is_some_and(|t| t.elapsed() >= SAVE_DELAY);
-            if (idle || user.sessions.is_empty()) && user.save_logged() && user.sessions.is_empty()
-            {
-                user.open = None;
+            for vault in &mut user.vaults {
+                vault.prune();
             }
         }
     }
 
     pub fn save_and_lock_everything(&mut self) {
-        for user in self.users.values_mut() {
-            user.save_logged();
-            user.sessions.clear();
-            user.open = None;
+        for vault in self.users.values_mut().flat_map(|u| u.vaults.iter_mut()) {
+            vault.save_logged();
+            vault.sessions.clear();
+            vault.open = None;
         }
     }
 }
@@ -212,8 +324,8 @@ pub fn lock(state: &Shared) -> MutexGuard<'_, State> {
 /// What an inode resolves to for the process asking about it.
 enum Target<'a> {
     Root,
-    UserDir(&'a UserState),
-    Node(&'a UserState, u64, &'a Node),
+    VaultDir(&'a UserState, &'a VaultState),
+    Node(&'a UserState, &'a VaultState, u64, &'a Node),
 }
 
 fn errno(e: TreeError) -> Errno {
@@ -250,50 +362,55 @@ impl VaultFs {
         if ino == ROOT {
             return Some(Target::Root);
         }
-        let (slot, generation, local) = split_ino(ino);
+        let (slot, index, generation, local) = split_ino(ino);
         let user = state.user(state.uid_of_slot(slot)?)?;
         if user.account.uid != req.uid() {
             return None;
         }
+        let vault = user.by_index(index)?;
         if generation == 0 && local == tree::ROOT {
-            return Some(Target::UserDir(user));
+            return vault.exists().then_some(Target::VaultDir(user, vault));
         }
-        if generation != user.generation {
+        if generation != vault.generation {
             return None;
         }
-        let node = user.visible(req.pid())?.tree.node(local)?;
-        Some(Target::Node(user, local, node))
+        let node = vault.visible(req.pid())?.tree.node(local)?;
+        Some(Target::Node(user, vault, local, node))
     }
 
-    /// The caller's tree and the tree inode `ino` names, for a change. Only an
-    /// unlocked shell of the owner, or its descendants, may change anything.
+    /// The vault and tree inode `ino` names, for a change. Only an unlocked shell of the
+    /// owner, or its descendants, may change anything in that vault.
     fn writable<'a>(
         &self,
         state: &'a mut State,
         req: &Request,
         ino: u64,
-    ) -> Result<(&'a mut UserState, u64), Errno> {
+    ) -> Result<(&'a mut VaultState, u64), Errno> {
         if ino == ROOT {
             return Err(Errno::EACCES);
         }
-        let (slot, generation, local) = split_ino(ino);
+        let (slot, index, generation, local) = split_ino(ino);
         let uid = state.uid_of_slot(slot).ok_or(Errno::ENOENT)?;
         if uid != req.uid() {
             return Err(Errno::ENOENT);
         }
+        if index == 0 {
+            return Err(Errno::EACCES);
+        }
         let user = state.users.get_mut(&uid).ok_or(Errno::ENOENT)?;
-        let user_dir = generation == 0 && local == tree::ROOT;
-        if !user_dir && generation != user.generation {
+        let vault = user.by_index_mut(index).ok_or(Errno::ENOENT)?;
+        let vault_dir = generation == 0 && local == tree::ROOT;
+        if !vault_dir && generation != vault.generation {
             return Err(Errno::ENOENT);
         }
-        if user.visible(req.pid()).is_none() {
-            return Err(if user_dir {
+        if vault.visible(req.pid()).is_none() {
+            return Err(if vault_dir {
                 Errno::EACCES
             } else {
                 Errno::ENOENT
             });
         }
-        Ok((user, local))
+        Ok((vault, local))
     }
 
     fn change<T>(
@@ -302,47 +419,50 @@ impl VaultFs {
         ino: u64,
         save_now: bool,
         f: impl FnOnce(&mut Tree, u64) -> Result<T, TreeError>,
-    ) -> Result<(T, u16, u16), Errno> {
+    ) -> Result<(T, u64), Errno> {
         let mut state = lock(&self.state);
-        let (user, local) = self.writable(&mut state, req, ino)?;
-        let tree = &mut user.open.as_mut().ok_or(Errno::ENOENT)?.tree;
+        let slot = split_ino(ino).0;
+        let (vault, local) = self.writable(&mut state, req, ino)?;
+        let tree = &mut vault.open.as_mut().ok_or(Errno::ENOENT)?.tree;
         let out = f(tree, local).map_err(errno)?;
-        user.mark_changed();
-        if save_now && !user.save_logged() {
+        vault.mark_changed();
+        if save_now && !vault.save_logged() {
             return Err(Errno::EIO);
         }
-        Ok((out, user.slot, user.generation))
+        let base = global_ino(slot, vault.index, vault.generation, 0);
+        Ok((out, base))
     }
 
-    /// An entry reply for `local`, looked up again after the change that created it.
-    fn entry_for(&self, req: &Request, slot: u16, generation: u16, local: u64) -> Option<FileAttr> {
-        let ino = global_ino(slot, generation, local);
-        let state = lock(&self.state);
-        let target = self.target(&state, req, ino)?;
-        Some(self.attr(ino, &target))
+    /// The tree inode of `other`, which must be writable and in the same vault as `ino`.
+    fn same_vault(&self, req: &Request, ino: u64, other: u64) -> Result<u64, Errno> {
+        let (slot, index, ..) = split_ino(ino);
+        let (other_slot, other_index, ..) = split_ino(other);
+        if other == ROOT || other_slot != slot || other_index != index || index == 0 {
+            return Err(Errno::EXDEV);
+        }
+        let mut state = lock(&self.state);
+        let (_, local) = self.writable(&mut state, req, other)?;
+        Ok(local)
+    }
+
+    fn save_now(&self, req: &Request, ino: u64) -> Result<(), Errno> {
+        let mut state = lock(&self.state);
+        let (vault, _) = self.writable(&mut state, req, ino)?;
+        if vault.save_logged() {
+            Ok(())
+        } else {
+            Err(Errno::EIO)
+        }
     }
 
     fn attr(&self, ino: u64, target: &Target) -> FileAttr {
+        let dir = |uid, gid, perm, mtime| (FileType::Directory, perm, 0, 2, uid, gid, mtime);
         let (kind, perm, size, nlink, uid, gid, mtime) = match target {
-            Target::Root => (
-                FileType::Directory,
-                0o755,
-                0,
-                2,
-                self.owner_uid,
-                self.owner_gid,
-                self.started,
-            ),
-            Target::UserDir(user) => (
-                FileType::Directory,
-                0o700,
-                0,
-                2,
-                user.account.uid,
-                user.account.gid,
-                self.started,
-            ),
-            Target::Node(user, _, node) => match &node.kind {
+            Target::Root => dir(self.owner_uid, self.owner_gid, 0o755, self.started),
+            Target::VaultDir(user, _) => {
+                dir(user.account.uid, user.account.gid, 0o700, self.started)
+            }
+            Target::Node(user, _, _, node) => match &node.kind {
                 Kind::File { mode, data } => (
                     FileType::RegularFile,
                     *mode as u16,
@@ -352,15 +472,7 @@ impl VaultFs {
                     user.account.gid,
                     node.mtime,
                 ),
-                Kind::Dir { .. } => (
-                    FileType::Directory,
-                    0o700,
-                    0,
-                    2,
-                    user.account.uid,
-                    user.account.gid,
-                    node.mtime,
-                ),
+                Kind::Dir { .. } => dir(user.account.uid, user.account.gid, 0o700, node.mtime),
             },
         };
         FileAttr {
@@ -382,31 +494,26 @@ impl VaultFs {
         }
     }
 
-    fn user_dir_ino(user: &UserState) -> u64 {
-        global_ino(user.slot, 0, tree::ROOT)
-    }
-
-    fn node_ino(user: &UserState, local: u64) -> u64 {
+    fn node_ino(user: &UserState, vault: &VaultState, local: u64) -> u64 {
         if local == tree::ROOT {
-            Self::user_dir_ino(user)
+            global_ino(user.slot, vault.index, 0, tree::ROOT)
         } else {
-            global_ino(user.slot, user.generation, local)
+            global_ino(user.slot, vault.index, vault.generation, local)
         }
     }
 
-    fn reply_entry(
-        &self,
-        req: &Request,
-        result: Result<(u64, u16, u16), Errno>,
-        reply: ReplyEntry,
-    ) {
-        match result {
-            Ok((local, slot, generation)) => match self.entry_for(req, slot, generation, local) {
-                Some(attr) => reply.entry(&NO_CACHE, &attr, Generation(0)),
-                None => reply.error(Errno::ENOENT),
-            },
+    /// An entry reply for the tree inode `local` of the vault `base` belongs to.
+    fn reply_entry(&self, req: &Request, result: Result<(u64, u64), Errno>, reply: ReplyEntry) {
+        match result.and_then(|(local, base)| self.entry_attr(req, base | local)) {
+            Ok(attr) => reply.entry(&NO_CACHE, &attr, Generation(0)),
             Err(e) => reply.error(e),
         }
+    }
+
+    fn entry_attr(&self, req: &Request, ino: u64) -> Result<FileAttr, Errno> {
+        let state = lock(&self.state);
+        let target = self.target(&state, req, ino).ok_or(Errno::ENOENT)?;
+        Ok(self.attr(ino, &target))
     }
 
     fn reply_done<T>(result: Result<T, Errno>, reply: ReplyEmpty) {
@@ -415,54 +522,31 @@ impl VaultFs {
             Err(e) => reply.error(e),
         }
     }
-
-    /// The tree inode of `other`, which must be writable and in the same tree as `ino`.
-    fn same_tree(&self, req: &Request, ino: u64, other: u64) -> Result<u64, Errno> {
-        if other == ROOT || split_ino(other).0 != split_ino(ino).0 {
-            return Err(Errno::EXDEV);
-        }
-        let mut state = lock(&self.state);
-        let (_, local) = self.writable(&mut state, req, other)?;
-        Ok(local)
-    }
-
-    fn save_now(&self, req: &Request, ino: u64) -> Result<(), Errno> {
-        let mut state = lock(&self.state);
-        let (user, _) = self.writable(&mut state, req, ino)?;
-        if user.save_logged() {
-            Ok(())
-        } else {
-            Err(Errno::EIO)
-        }
-    }
 }
 
 impl Filesystem for VaultFs {
     fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let mut state = lock(&self.state);
         if parent.0 == ROOT {
-            if name != OsStr::new(SELF) || state.user_mut(req.uid()).is_none() {
-                return reply.error(Errno::ENOENT);
-            }
-            let user = state.user(req.uid()).expect("just inserted");
-            let ino = Self::user_dir_ino(user);
-            return reply.entry(
-                &NO_CACHE,
-                &self.attr(ino, &Target::UserDir(user)),
-                Generation(0),
-            );
+            state.user_mut(req.uid());
         }
         let found = match self.target(&state, req, parent.0) {
-            Some(Target::UserDir(user)) => Some((user, tree::ROOT)),
-            Some(Target::Node(user, local, _)) => Some((user, local)),
+            Some(Target::Root) => state
+                .user(req.uid())
+                .and_then(|user| Some((user, user.vault(name.to_str()?)?)))
+                .filter(|(_, vault)| vault.exists())
+                .map(|(user, vault)| {
+                    let ino = Self::node_ino(user, vault, tree::ROOT);
+                    self.attr(ino, &Target::VaultDir(user, vault))
+                }),
+            Some(Target::VaultDir(user, vault)) => {
+                self.child_attr(req, user, vault, tree::ROOT, name)
+            }
+            Some(Target::Node(user, vault, local, _)) => {
+                self.child_attr(req, user, vault, local, name)
+            }
             _ => None,
-        }
-        .and_then(|(user, local)| {
-            let tree = &user.visible(req.pid())?.tree;
-            let child = tree.child(local, name)?;
-            let ino = Self::node_ino(user, child);
-            Some(self.attr(ino, &Target::Node(user, child, tree.node(child)?)))
-        });
+        };
         match found {
             Some(attr) => reply.entry(&NO_CACHE, &attr, Generation(0)),
             None => reply.error(Errno::ENOENT),
@@ -517,13 +601,9 @@ impl Filesystem for VaultFs {
             }
             Ok(())
         });
-        if let Err(e) = result {
-            return reply.error(e);
-        }
-        let state = lock(&self.state);
-        match self.target(&state, req, ino.0) {
-            Some(target) => reply.attr(&NO_CACHE, &self.attr(ino.0, &target)),
-            None => reply.error(Errno::ENOENT),
+        match result.and_then(|_| self.entry_attr(req, ino.0)) {
+            Ok(attr) => reply.attr(&NO_CACHE, &attr),
+            Err(e) => reply.error(e),
         }
     }
 
@@ -595,7 +675,7 @@ impl Filesystem for VaultFs {
             return reply.error(Errno::EINVAL);
         }
         let no_replace = flags.contains(RenameFlags::RENAME_NOREPLACE);
-        let new_local = match self.same_tree(req, parent.0, newparent.0) {
+        let new_local = match self.same_vault(req, parent.0, newparent.0) {
             Ok(local) => local,
             Err(e) => return reply.error(e),
         };
@@ -614,7 +694,7 @@ impl Filesystem for VaultFs {
         newname: &OsStr,
         reply: ReplyEntry,
     ) {
-        let source = match self.same_tree(req, newparent.0, ino.0) {
+        let source = match self.same_vault(req, newparent.0, ino.0) {
             Ok(local) => local,
             Err(e) => return reply.error(e),
         };
@@ -637,18 +717,15 @@ impl Filesystem for VaultFs {
         let result = self.change(req, parent.0, false, |tree, local| {
             tree.create_file(local, name, mode & !umask)
         });
-        match result {
-            Ok((local, slot, generation)) => match self.entry_for(req, slot, generation, local) {
-                // direct I/O keeps file contents out of the shared page cache
-                Some(attr) => reply.created(
-                    &NO_CACHE,
-                    &attr,
-                    Generation(0),
-                    FileHandle(0),
-                    FopenFlags::FOPEN_DIRECT_IO,
-                ),
-                None => reply.error(Errno::ENOENT),
-            },
+        match result.and_then(|(local, base)| self.entry_attr(req, base | local)) {
+            // direct I/O keeps file contents out of the shared page cache
+            Ok(attr) => reply.created(
+                &NO_CACHE,
+                &attr,
+                Generation(0),
+                FileHandle(0),
+                FopenFlags::FOPEN_DIRECT_IO,
+            ),
             Err(e) => reply.error(e),
         }
     }
@@ -657,7 +734,7 @@ impl Filesystem for VaultFs {
         let state = lock(&self.state);
         match self.target(&state, req, ino.0) {
             // direct I/O keeps file contents out of the shared page cache
-            Some(Target::Node(_, _, node)) if matches!(node.kind, Kind::File { .. }) => {
+            Some(Target::Node(.., node)) if matches!(node.kind, Kind::File { .. }) => {
                 reply.opened(FileHandle(0), FopenFlags::FOPEN_DIRECT_IO)
             }
             Some(_) => reply.error(Errno::EISDIR),
@@ -677,7 +754,7 @@ impl Filesystem for VaultFs {
         reply: ReplyData,
     ) {
         let state = lock(&self.state);
-        let Some(Target::Node(_, _, node)) = self.target(&state, req, ino.0) else {
+        let Some(Target::Node(.., node)) = self.target(&state, req, ino.0) else {
             return reply.error(Errno::ENOENT);
         };
         let Kind::File { data, .. } = &node.kind else {
@@ -749,7 +826,7 @@ impl Filesystem for VaultFs {
     fn opendir(&self, req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let state = lock(&self.state);
         match self.target(&state, req, ino.0) {
-            Some(Target::Node(_, _, node)) if matches!(node.kind, Kind::File { .. }) => {
+            Some(Target::Node(.., node)) if matches!(node.kind, Kind::File { .. }) => {
                 reply.error(Errno::ENOTDIR)
             }
             Some(_) => reply.opened(FileHandle(0), FopenFlags::empty()),
@@ -766,37 +843,41 @@ impl Filesystem for VaultFs {
         mut reply: ReplyDirectory,
     ) {
         let mut state = lock(&self.state);
-        if ino.0 == ROOT {
-            state.user_mut(req.uid());
+        if ino.0 == ROOT
+            && let Some(user) = state.user_mut(req.uid())
+        {
+            user.discover();
         }
-        let mut listing: Vec<(u64, FileType, OsString)> = Vec::new();
+        let dots = |this: u64, parent: u64| -> Vec<(u64, FileType, OsString)> {
+            vec![
+                (this, FileType::Directory, ".".into()),
+                (parent, FileType::Directory, "..".into()),
+            ]
+        };
+        let mut listing;
         match self.target(&state, req, ino.0) {
             Some(Target::Root) => {
-                listing.push((ROOT, FileType::Directory, ".".into()));
-                listing.push((ROOT, FileType::Directory, "..".into()));
+                listing = dots(ROOT, ROOT);
                 if let Some(user) = state.user(req.uid()) {
-                    listing.push((Self::user_dir_ino(user), FileType::Directory, SELF.into()));
+                    for vault in user.vaults().filter(|v| v.exists()) {
+                        let ino = Self::node_ino(user, vault, tree::ROOT);
+                        listing.push((ino, FileType::Directory, vault.name.clone().into()));
+                    }
                 }
             }
-            Some(Target::UserDir(user)) => {
-                listing.push((ino.0, FileType::Directory, ".".into()));
-                listing.push((ROOT, FileType::Directory, "..".into()));
-                if let Some(open) = user.visible(req.pid()) {
-                    push_children(&mut listing, user, &open.tree, tree::ROOT);
+            Some(Target::VaultDir(user, vault)) => {
+                listing = dots(ino.0, ROOT);
+                if let Some(open) = vault.visible(req.pid()) {
+                    push_children(&mut listing, user, vault, &open.tree, tree::ROOT);
                 }
             }
-            Some(Target::Node(user, local, node)) => {
+            Some(Target::Node(user, vault, local, node)) => {
                 if !matches!(node.kind, Kind::Dir { .. }) {
                     return reply.error(Errno::ENOTDIR);
                 }
-                listing.push((ino.0, FileType::Directory, ".".into()));
-                listing.push((
-                    Self::node_ino(user, node.parent),
-                    FileType::Directory,
-                    "..".into(),
-                ));
-                if let Some(open) = user.visible(req.pid()) {
-                    push_children(&mut listing, user, &open.tree, local);
+                listing = dots(ino.0, Self::node_ino(user, vault, node.parent));
+                if let Some(open) = vault.visible(req.pid()) {
+                    push_children(&mut listing, user, vault, &open.tree, local);
                 }
             }
             None => return reply.error(Errno::ENOENT),
@@ -810,9 +891,26 @@ impl Filesystem for VaultFs {
     }
 }
 
+impl VaultFs {
+    fn child_attr(
+        &self,
+        req: &Request,
+        user: &UserState,
+        vault: &VaultState,
+        dir: u64,
+        name: &OsStr,
+    ) -> Option<FileAttr> {
+        let tree = &vault.visible(req.pid())?.tree;
+        let child = tree.child(dir, name)?;
+        let ino = Self::node_ino(user, vault, child);
+        Some(self.attr(ino, &Target::Node(user, vault, child, tree.node(child)?)))
+    }
+}
+
 fn push_children(
     listing: &mut Vec<(u64, FileType, OsString)>,
     user: &UserState,
+    vault: &VaultState,
     tree: &Tree,
     dir: u64,
 ) {
@@ -824,7 +922,7 @@ fn push_children(
             Some(Kind::File { .. }) => FileType::RegularFile,
             _ => FileType::Directory,
         };
-        listing.push((VaultFs::node_ino(user, child), kind, name.clone()));
+        listing.push((VaultFs::node_ino(user, vault, child), kind, name.clone()));
     }
 }
 
@@ -834,9 +932,24 @@ mod tests {
 
     #[test]
     fn inode_ranges_do_not_overlap() {
-        assert_eq!(split_ino(global_ino(3, 9, 7)), (3, 9, 7));
-        assert_ne!(global_ino(1, 0, tree::ROOT), ROOT);
-        assert_eq!(split_ino(ROOT), (0, 0, ROOT));
-        assert_ne!(global_ino(1, 1, 5), global_ino(1, 2, 5));
+        assert_eq!(split_ino(global_ino(3, 2, 9, 7)), (3, 2, 9, 7));
+        assert_eq!(
+            split_ino(global_ino(0xfff, 0xff, 0xfff, 0xffff_ffff)),
+            (0xfff, 0xff, 0xfff, 0xffff_ffff)
+        );
+        assert_ne!(global_ino(1, 1, 0, tree::ROOT), ROOT);
+        assert_eq!(split_ino(ROOT), (0, 0, 0, ROOT));
+        assert_ne!(global_ino(1, 1, 1, 5), global_ino(1, 2, 1, 5));
+        assert_ne!(global_ino(1, 1, 1, 5), global_ino(1, 1, 2, 5));
+    }
+
+    #[test]
+    fn vault_names_are_plain() {
+        for good in ["default", "work", "prod-eu.1", "a_b"] {
+            assert!(check_vault_name(good).is_ok(), "{good}");
+        }
+        for bad in ["", ".hidden", "a/b", "..", "with space", &"x".repeat(65)] {
+            assert!(check_vault_name(bad).is_err(), "{bad}");
+        }
     }
 }

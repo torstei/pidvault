@@ -15,50 +15,74 @@ pub const ALLOW_SAME_UID_ENV: &str = "SSHVAULT_INSECURE_ALLOW_SAME_UID_DAEMON";
 
 const MAX_REQUEST: u64 = 8 * 1024 * 1024;
 
+/// Every request names the vault it is about; `vault` defaults to the default vault.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// Stores `vault`, a base64 age file, after checking that `passphrase` opens it,
-    /// and with `unlock` unlocks the calling shell. Replacing an existing vault needs an
-    /// unlocked caller.
+    /// Stores `data`, a base64 age file, as `vault` after checking that `passphrase`
+    /// opens it, and with `unlock` unlocks it for the calling shell. Replacing an
+    /// existing vault needs a caller that has it unlocked.
     Import {
         vault: String,
+        data: String,
         passphrase: Zeroizing<String>,
         #[serde(default)]
         unlock: bool,
     },
-    /// Returns the vault encrypted with `passphrase`, which must be the vault's, to an
-    /// unlocked caller.
+    /// Returns the vault encrypted with `passphrase`, which must be the vault's, to a
+    /// caller that has it unlocked.
     Export {
+        vault: String,
         passphrase: Zeroizing<String>,
     },
     /// Re-encrypts the vault key under a new passphrase.
     Passwd {
+        vault: String,
         old: Zeroizing<String>,
         new: Zeroizing<String>,
     },
     Unlock {
+        vault: String,
         passphrase: Zeroizing<String>,
     },
-    /// Locks the caller's shell, or with `all` every shell of the caller's user.
+    /// Locks `vault`, or every vault, for the caller's shell; with `all`, for every
+    /// shell of the caller's user.
     Lock {
+        vault: Option<String>,
         all: bool,
     },
     Status,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct VaultStatus {
+    pub name: String,
+    /// The unlocked shell the caller descends from, if any.
+    pub unlocked_by: Option<u32>,
+    /// Shells of the caller's user that have this vault unlocked.
+    pub sessions: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub ok: bool,
     pub message: String,
-    /// The unlocked shell the caller descends from, if any.
-    pub unlocked_by: Option<u32>,
-    /// Unlocked shells of the caller's user.
-    pub sessions: usize,
-    pub has_vault: bool,
+    /// The caller's vaults.
+    #[serde(default)]
+    pub vaults: Vec<VaultStatus>,
     /// The base64 age file, in reply to `Export`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vault: Option<String>,
+    pub data: Option<String>,
+}
+
+impl Response {
+    pub fn vault(&self, name: &str) -> Option<&VaultStatus> {
+        self.vaults.iter().find(|v| v.name == name)
+    }
+
+    pub fn any_unlocked(&self) -> bool {
+        self.vaults.iter().any(|v| v.unlocked_by.is_some())
+    }
 }
 
 pub fn call(socket: &Path, request: &Request) -> Result<Response> {

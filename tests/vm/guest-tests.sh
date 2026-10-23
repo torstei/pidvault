@@ -73,12 +73,12 @@ as alice sh -c '
     ssh-keygen -q -t ed25519 -N "" -f ~/src/id_vm
     cat ~/src/id_vm.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
     rm ~/src/id_vm.pub
-    printf "Host vm\n  HostName 127.0.0.1\n  User alice\n  IdentityFile /run/sshvault/self/id_vm\n  IdentitiesOnly yes\n  IdentityAgent none\n  BatchMode yes\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n" > ~/src/config
+    printf "Host vm\n  HostName 127.0.0.1\n  User alice\n  IdentityFile /run/sshvault/default/id_vm\n  IdentitiesOnly yes\n  IdentityAgent none\n  BatchMode yes\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n" > ~/src/config
     sshvault stub > ~/.ssh/config
 '
 check "alice creates a vault" as alice sh -c \
     'echo alice-pass | sshvault create --passphrase-stdin --work-factor 12 --from ~/src && rm ~/src/id_vm'
-ALICE_VAULT="/var/lib/sshvault/$(id -u alice)/vault.sshvault"
+ALICE_VAULT="/var/lib/sshvault/$(id -u alice)/default.sshvault"
 check "alice's vault is stored by the daemon" equals "$(stat -c '%U %a' "$ALICE_VAULT")" "sshvault 600"
 check "alice cannot read her stored vault" refused as alice cat "$ALICE_VAULT"
 
@@ -92,12 +92,17 @@ unlocked alice "touch /tmp/alice-unlocked; exec sleep 600" &
 for _ in $(seq 100); do [[ -e /tmp/alice-unlocked ]] && break; sleep 0.1; done
 check "an unlocked alice shell stays up for the next checks" test -e /tmp/alice-unlocked
 
-check "unlocked shell reads alice's config" unlocked alice 'grep -q id_vm /run/sshvault/self/config'
-check "self belongs to alice" equals "$(as alice stat -c '%U %a' /run/sshvault/self)" "alice 700"
-check "another process of alice sees nothing" refused as alice cat /run/sshvault/self/config
-check "alice's user services see nothing" refused in_manager alice --wait --pipe cat /run/sshvault/self/config
-check "bob's unlocked shell sees only his own vault" unlocked bob 'grep -q bob-from-vault /run/sshvault/self/config'
-check "root sees nothing" refused cat /run/sshvault/self/config
+check "unlocked shell reads alice's config" unlocked alice 'grep -q id_vm /run/sshvault/default/config'
+check "alice's vault directory belongs to her" equals "$(as alice stat -c '%U %a' /run/sshvault/default)" "alice 700"
+check "another process of alice sees nothing" refused as alice cat /run/sshvault/default/config
+check "alice's user services see nothing" refused in_manager alice --wait --pipe cat /run/sshvault/default/config
+check "bob's unlocked shell sees only his own vault" unlocked bob 'grep -q bob-from-vault /run/sshvault/default/config'
+check "root sees nothing" refused cat /run/sshvault/default/config
+as alice sh -c 'echo work-pass | sshvault create work --no-unlock --passphrase-stdin --work-factor 12 >/dev/null'
+check "a shell unlocked for one vault sees only that one" as alice sh -c \
+    'echo work-pass | sshvault unlock work --passphrase-stdin >/dev/null && test -d /run/sshvault/work && ! cat /run/sshvault/default/config 2>/dev/null'
+check "alice lists only her own vaults" equals "$(as alice ls /run/sshvault | tr '\n' ' ')" "default work "
+check "bob lists only his" equals "$(as bob ls /run/sshvault | tr '\n' ' ')" "default "
 check "decrypted vault is held in locked memory" \
     awk '/^VmLck:/ { exit !($2 > 0) }' "/proc/$(daemon_pid)/status"
 
@@ -105,13 +110,13 @@ check "ssh login with the vault key from an unlocked shell" equals "$(unlocked a
 check "the same ssh from another process of alice fails" refused as alice ssh vm true
 check "naming the key explicitly does not help" refused as alice ssh -F /dev/null -o BatchMode=yes \
     -o IdentityAgent=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -i /run/sshvault/self/id_vm alice@127.0.0.1 true
+    -i /run/sshvault/default/id_vm alice@127.0.0.1 true
 
 check "alice edits her config from an unlocked shell" unlocked alice \
-    "sed -i 's/LogLevel ERROR/LogLevel QUIET/' /run/sshvault/self/config"
-check "another process of alice cannot write" refused as alice sh -c 'echo planted >> /run/sshvault/self/config'
+    "sed -i 's/LogLevel ERROR/LogLevel QUIET/' /run/sshvault/default/config"
+check "another process of alice cannot write" refused as alice sh -c 'echo planted >> /run/sshvault/default/config'
 check "ssh records a new host key in the vault" unlocked alice \
-    'ssh -o UserKnownHostsFile=/run/sshvault/self/known_hosts -o StrictHostKeyChecking=accept-new vm true && test -s /run/sshvault/self/known_hosts'
+    'ssh -o UserKnownHostsFile=/run/sshvault/default/known_hosts -o StrictHostKeyChecking=accept-new vm true && test -s /run/sshvault/default/known_hosts'
 check "export needs an unlocked shell" refused as alice sh -c \
     'echo alice-pass | sshvault export --passphrase-stdin /tmp/alice-denied.age'
 check "alice exports her vault from an unlocked shell" unlocked alice \
@@ -121,7 +126,7 @@ install -o carol -m 600 /tmp/alice-export.age /tmp/carol-import.age
 check "carol imports alice's export" as carol sh -c \
     'echo alice-pass | sshvault import --passphrase-stdin /tmp/carol-import.age'
 check "the imported vault works for a user with another name" as carol sh -c \
-    'echo alice-pass | sshvault unlock --passphrase-stdin >/dev/null && grep -q id_vm /run/sshvault/self/config'
+    'echo alice-pass | sshvault unlock --passphrase-stdin >/dev/null && grep -q id_vm /run/sshvault/default/config'
 
 # an orphaned client is adopted by alice's systemd --user, the subreaper of her whole login
 as alice mkfifo /tmp/orphan-fifo
@@ -138,7 +143,7 @@ check "the orphaned client was adopted by alice's systemd --user" test -n "$orph
 as alice sh -c 'echo alice-pass > /tmp/orphan-fifo'
 for _ in $(seq 50); do [[ -s /tmp/orphan.out ]] && break; sleep 0.1; done
 check "an orphaned unlock is refused" grep -q "directly from the shell" /tmp/orphan.out
-check "alice's user services still see nothing" refused in_manager alice --wait --pipe cat /run/sshvault/self/config
+check "alice's user services still see nothing" refused in_manager alice --wait --pipe cat /run/sshvault/default/config
 
 check "daemon logged no warnings" refused sh -c 'journalctl -b -u sshvault | grep -qi warning'
 
@@ -146,9 +151,10 @@ check "daemon logged no warnings" refused sh -c 'journalctl -b -u sshvault | gre
 
 systemctl restart sshvault
 check "service comes back after a restart" systemctl is-active --quiet sshvault
-check "a restart drops existing unlocks" sh -c 'runuser -u alice -- sshvault status | grep -q "^locked (0 "'
+check "a restart drops existing unlocks" sh -c \
+    'out=$(runuser -u alice -- sshvault status || true); if printf "%s\n" "$out" | grep -qv "locked here (0 "; then echo "$out"; false; fi'
 check "vaults and edits survive a restart" unlocked alice \
-    'grep -q "LogLevel QUIET" /run/sshvault/self/config && test -s /run/sshvault/self/known_hosts'
+    'grep -q "LogLevel QUIET" /run/sshvault/default/config && test -s /run/sshvault/default/known_hosts'
 
 as alice sh -c 'printf "Host plain\n  HostName 192.0.2.1\n" >> ~/.ssh/config'
 check "ssh config parses while the daemon runs" sh -c 'runuser -u alice -- ssh -G plain | grep -q "^hostname 192.0.2.1"'
@@ -161,11 +167,11 @@ check "ssh config still parses right after the daemon is killed" \
     sh -c 'runuser -u alice -- ssh -G plain | grep -q "^hostname 192.0.2.1"'
 for _ in $(seq 100); do systemctl is-active --quiet sshvault && break; sleep 0.1; done
 check "service restarts after being killed" systemctl is-active --quiet sshvault
-check "vault works after the restart" unlocked alice 'grep -q id_vm /run/sshvault/self/config'
+check "vault works after the restart" unlocked alice 'grep -q id_vm /run/sshvault/default/config'
 
 check "reinstalling over an installed package works" apt-get install -y -q --reinstall "$DEB"
 check "service is active after reinstalling" systemctl is-active --quiet sshvault
-check "vaults survive reinstalling" unlocked bob 'grep -q bob-from-vault /run/sshvault/self/config'
+check "vaults survive reinstalling" unlocked bob 'grep -q bob-from-vault /run/sshvault/default/config'
 
 check "package removes" apt-get remove -y -q sshvault
 check "service is stopped after removal" refused systemctl is-active --quiet sshvault
