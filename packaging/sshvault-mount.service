@@ -1,5 +1,6 @@
 [Unit]
 Description=sshvault mount helper
+Documentation=man:sshvault(1) https://github.com/torstei/sshvault
 Requires=sshvault-mount.socket
 After=sshvault-mount.socket
 

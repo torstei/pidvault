@@ -14,7 +14,7 @@ jobs:
   build:
     needs: ci
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write
@@ -29,13 +29,34 @@ jobs:
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "sshvault") | .version')
           [[ "v$version" == "$GITHUB_REF_NAME" ]] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $version" >&2; exit 1; }
+      - name: Install the packaging tools
+        run: cargo install cargo-deb cargo-auditable cargo-cyclonedx --locked
+      # the dependency list is embedded in the binary, so installed copies can be audited
       - name: Build the package
         run: |
-          cargo install cargo-deb --locked
-          cargo deb --output dist/
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> "$GITHUB_ENV"
+          cargo auditable build --release --locked
+          cargo deb --no-build --output dist/
+      - name: Check that a second build in another directory is identical
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/again" HEAD
+          cd "$RUNNER_TEMP/again"
+          cargo auditable build --release --locked
+          cargo deb --no-build --output dist/
+          cmp dist/*.deb "$GITHUB_WORKSPACE"/dist/*.deb
+      - name: Describe the dependencies
+        run: |
+          cargo cyclonedx --format json --no-build-deps --override-filename sshvault.cdx
+          mv sshvault.cdx.json dist/
+          rustc --version > dist/rustc-version.txt
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*.deb
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/*.deb
+          sbom-path: dist/sshvault.cdx.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: deb
@@ -63,8 +84,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.deb --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "See [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md)."
+          gh release create "$GITHUB_REF_NAME" dist/*.deb dist/sshvault.cdx.json --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes "See [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md).
+          Built reproducibly with $(cat dist/rustc-version.txt)."
       - name: Collect every released package
         env:
           GH_TOKEN: ${{ github.token }}

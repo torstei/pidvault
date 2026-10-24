@@ -1,5 +1,6 @@
 [Unit]
 Description=Per-shell access to encrypted SSH configuration
+Documentation=man:sshvault(1) https://github.com/torstei/sshvault
 Requires=sshvault.socket sshvault-mount.socket
 After=sshvault.socket sshvault-mount.socket local-fs.target systemd-sysusers.service
 

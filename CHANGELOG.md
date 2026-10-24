@@ -17,8 +17,12 @@
 - ECDSA (P-256 and P-384) signatures in the agent are made with constant-time arithmetic.
   The libraries used before could leak timing (RUSTSEC-2026-0387), which a process in an
   unlocked shell, timing many signatures, might have used to recover the key.
+- The package ships a man page and a Debian changelog, and passes lintian.
+- Releases are built reproducibly, the binary carries its dependency list for auditing
+  (`cargo auditable`), and each release has a CycloneDX SBOM with a signed attestation.
+- A security policy (`SECURITY.md`) for reporting vulnerabilities privately.
 
-## 0.2.0
+## 0.2.0 - 2026-10-23
 
 The first published release.
 
