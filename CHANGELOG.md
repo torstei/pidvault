@@ -12,6 +12,8 @@
   never beyond cost 2^20, and connections are capped per user and in total.
 - RSA signatures are blinded; the README recommends ed25519.
 - The agent refuses a connection once the process that opened it has exited.
+- Requests about a vault that does not exist no longer register its name, so no process
+  can use up a user's 255 vault places with made-up names.
 
 ## 0.2.0
 

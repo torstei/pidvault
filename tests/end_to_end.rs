@@ -1259,3 +1259,24 @@ fn a_wrong_passphrase_makes_the_next_try_wait() {
     ));
     assert_eq!(stdout(&o), "1\n1\n1\n", "{o:?}");
 }
+
+#[test]
+fn requests_for_made_up_vaults_cannot_use_up_a_users_places() {
+    let Some(f) = Fixture::start_empty() else {
+        return;
+    };
+    let o = f.outsider(&format!(
+        r#"for i in $(seq 300); do echo x | "$SV" unlock "made-up-$i" --passphrase-stdin 2>/dev/null; done
+           echo '{PASSPHRASE}' | "$SV" create real --passphrase-stdin --work-factor 10 | grep -c stored
+           "$SV" status"#
+    ));
+    assert!(
+        stdout(&o).starts_with("1\nreal: unlocked by shell"),
+        "{o:?}"
+    );
+    assert_eq!(
+        stdout(&o).lines().count(),
+        2,
+        "status lists only the real vault: {o:?}"
+    );
+}

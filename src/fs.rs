@@ -216,7 +216,7 @@ impl UserState {
             .collect();
         names.sort();
         for name in names {
-            let _ = self.vault_mut(&name);
+            let _ = self.vault_or_new(&name);
         }
     }
 
@@ -224,8 +224,21 @@ impl UserState {
         self.vaults.iter().find(|v| v.name == name)
     }
 
-    /// The vault called `name`, known from now on whether or not it exists yet.
-    pub fn vault_mut(&mut self, name: &str) -> Result<&mut VaultState> {
+    /// The existing vault called `name`. Requests about a vault that does not exist must
+    /// not register its name: a user's 255 places would otherwise fill up with names
+    /// anyone of their processes made up.
+    pub fn existing_vault_mut(&mut self, name: &str) -> Result<&mut VaultState> {
+        check_vault_name(name)?;
+        let known = self.vaults.iter().any(|v| v.name == name);
+        if !known && !self.dir.join(format!("{name}{VAULT_SUFFIX}")).exists() {
+            bail!("you have no vault `{name}`; create one with `sshvault create {name}`");
+        }
+        self.vault_or_new(name)
+    }
+
+    /// The vault called `name`, known from now on whether or not it exists yet; for
+    /// creating one.
+    pub fn vault_or_new(&mut self, name: &str) -> Result<&mut VaultState> {
         check_vault_name(name)?;
         if let Some(i) = self.vaults.iter().position(|v| v.name == name) {
             return Ok(&mut self.vaults[i]);
@@ -961,6 +974,98 @@ mod tests {
         assert_eq!(split_ino(ROOT), (0, 0, 0, ROOT));
         assert_ne!(global_ino(1, 1, 1, 5), global_ino(1, 2, 1, 5));
         assert_ne!(global_ino(1, 1, 1, 5), global_ino(1, 1, 2, 5));
+    }
+
+    fn user_in(dir: &std::path::Path) -> UserState {
+        let account = Account {
+            uid: crate::users::current_uid(),
+            gid: 0,
+        };
+        UserState::new(account, 1, dir.to_path_buf())
+    }
+
+    #[test]
+    fn hostile_vault_names_are_refused() {
+        let hostile = [
+            "",
+            ".",
+            "..",
+            "...",
+            "../x",
+            "x/..",
+            "a/b",
+            "/etc",
+            "x\0y",
+            "x\ny",
+            " x",
+            "x ",
+            ".hidden",
+            "%2e%2e",
+            "..%2f",
+            "café",
+            "ｘ",
+            "x\u{202e}y",
+            "*",
+            "?",
+            "~",
+            "x:y",
+        ];
+        for name in hostile {
+            assert!(check_vault_name(name).is_err(), "{name:?} was accepted");
+        }
+        assert!(check_vault_name(&"x".repeat(65)).is_err());
+        assert!(check_vault_name(&"x".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn every_accepted_name_stays_in_the_users_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut user = user_in(dir.path());
+        let alphabet: Vec<char> = "ab.-_/\\\0\n é~%".chars().collect();
+        let mut seed = 0x9e37_79b9_u64;
+        let mut accepted = 0;
+        for _ in 0..20_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let len = (seed % 12) as usize;
+            let name: String = (0..len)
+                .map(|i| alphabet[((seed >> (i * 5)) % alphabet.len() as u64) as usize])
+                .collect();
+            if check_vault_name(&name).is_err() {
+                continue;
+            }
+            accepted += 1;
+            let path = dir.path().join(format!("{name}{VAULT_SUFFIX}"));
+            assert_eq!(path.parent(), Some(dir.path()), "{name:?}");
+            assert_eq!(
+                path.file_name().unwrap().to_str(),
+                Some(&*format!("{name}{VAULT_SUFFIX}"))
+            );
+            if user.vaults.len() < 200 {
+                assert_eq!(user.vault_or_new(&name).unwrap().path, path, "{name:?}");
+            }
+        }
+        assert!(
+            accepted > 100,
+            "the generator should produce valid names too"
+        );
+    }
+
+    #[test]
+    fn made_up_names_take_no_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut user = user_in(dir.path());
+        for i in 0..1000 {
+            assert!(user.existing_vault_mut(&format!("made-up-{i}")).is_err());
+        }
+        assert!(user.vaults.is_empty());
+        assert!(user.vault_or_new("real").is_ok());
+        std::fs::write(dir.path().join("on-disk.sshvault"), b"").unwrap();
+        assert!(
+            user.existing_vault_mut("on-disk").is_ok(),
+            "a vault on disk is found"
+        );
     }
 
     #[test]

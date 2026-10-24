@@ -130,6 +130,9 @@ check "a shell unlocked for one vault sees only that one" as alice sh -c \
     'echo work-pass | sshvault unlock work --passphrase-stdin >/dev/null && test -d /run/sshvault/work && ! cat /run/sshvault/default/config 2>/dev/null'
 check "alice lists only her own vaults" equals "$(as alice ls /run/sshvault | tr '\n' ' ')" "default work "
 check "bob lists only his" equals "$(as bob ls /run/sshvault | tr '\n' ' ')" "default "
+check "a vault name only alice has does not exist for bob" refused as bob stat /run/sshvault/work
+check "bob cannot unlock alice's vault by its name" sh -c \
+    'runuser -u bob -- sh -c "echo work-pass | sshvault unlock work --passphrase-stdin" 2>&1 | grep -q "you have no vault"'
 check "decrypted vault is held in locked memory" \
     awk '/^VmLck:/ { exit !($2 > 0) }' "/proc/$(daemon_pid)/status"
 
