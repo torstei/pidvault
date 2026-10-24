@@ -333,8 +333,8 @@ named in the release notes, `SOURCE_DATE_EPOCH` set to the tagged commit's time
 
 Licensed under either of
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([APACHE-LICENSE](APACHE-LICENSE))
+- MIT license ([MIT-LICENSE](MIT-LICENSE))
 
 at your option.
 
