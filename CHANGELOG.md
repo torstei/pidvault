@@ -14,6 +14,9 @@
 - The agent refuses a connection once the process that opened it has exited.
 - Requests about a vault that does not exist no longer register its name, so no process
   can use up a user's 255 vault places with made-up names.
+- ECDSA (P-256 and P-384) signatures in the agent are made with constant-time arithmetic.
+  The libraries used before could leak timing (RUSTSEC-2026-0387), which a process in an
+  unlocked shell, timing many signatures, might have used to recover the key.
 
 ## 0.2.0
 
