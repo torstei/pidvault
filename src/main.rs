@@ -1,17 +1,3 @@
-mod agent;
-mod daemon;
-mod fs;
-mod keys;
-mod limits;
-mod procs;
-mod protocol;
-mod secret;
-mod sessions;
-mod systemd;
-mod tree;
-mod users;
-mod vault;
-
 use std::io::{BufRead, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -24,7 +10,8 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
-use crate::protocol::{Request, Response};
+use sshvault::protocol::{Request, Response};
+use sshvault::{daemon, fs, keys, protocol, secret, tree, vault};
 
 /// Per-shell access to an encrypted SSH configuration directory.
 #[derive(Parser)]

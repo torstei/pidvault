@@ -92,14 +92,55 @@ pub fn serve(mut stream: UnixStream, state: &Shared) {
     }
 }
 
+/// A request the agent answers; anything else gets a failure.
+#[derive(Debug, PartialEq)]
+pub enum AgentRequest<'a> {
+    Identities,
+    Sign {
+        blob: &'a [u8],
+        data: &'a [u8],
+        flags: u32,
+    },
+    /// ssh's session-bind extension; `forwarded` marks a connection made for a remote host.
+    SessionBind {
+        forwarded: bool,
+    },
+}
+
+pub fn parse_request(request: &[u8]) -> Result<AgentRequest<'_>> {
+    let (&kind, mut body) = request.split_first().context("empty message")?;
+    match kind {
+        REQUEST_IDENTITIES => Ok(AgentRequest::Identities),
+        SIGN_REQUEST => Ok(AgentRequest::Sign {
+            blob: take_string(&mut body)?,
+            data: take_string(&mut body)?,
+            flags: take_u32(&mut body)?,
+        }),
+        EXTENSION => {
+            let name = take_string(&mut body)?;
+            if name != SESSION_BIND {
+                bail!("unsupported extension");
+            }
+            let _host_key = take_string(&mut body)?;
+            let _session_id = take_string(&mut body)?;
+            let _signature = take_string(&mut body)?;
+            let forwarding = *body.first().context("truncated session-bind")?;
+            Ok(AgentRequest::SessionBind {
+                forwarded: forwarding != 0,
+            })
+        }
+        // adding, removing and locking keys: keys get in by being written to a vault
+        _ => bail!("unsupported request"),
+    }
+}
+
 impl Connection {
     fn answer(&mut self, request: &[u8], state: &Shared) -> Result<Vec<u8>> {
         if self.process.has_exited() {
             bail!("the process that connected is gone");
         }
-        let (&kind, mut body) = request.split_first().context("empty message")?;
-        match kind {
-            REQUEST_IDENTITIES => {
+        match parse_request(request)? {
+            AgentRequest::Identities => {
                 let keys = self.usable_keys(state);
                 let mut reply = vec![IDENTITIES_ANSWER];
                 reply.extend_from_slice(&(keys.len() as u32).to_be_bytes());
@@ -109,10 +150,7 @@ impl Connection {
                 }
                 Ok(reply)
             }
-            SIGN_REQUEST => {
-                let blob = take_string(&mut body)?;
-                let data = take_string(&mut body)?;
-                let flags = take_u32(&mut body)?;
+            AgentRequest::Sign { blob, data, flags } => {
                 let key = self
                     .usable_keys(state)
                     .into_iter()
@@ -122,20 +160,10 @@ impl Connection {
                 put_string(&mut reply, &key.sign(data, flags)?);
                 Ok(reply)
             }
-            EXTENSION => {
-                let name = take_string(&mut body)?;
-                if name != SESSION_BIND {
-                    bail!("unsupported extension");
-                }
-                let _host_key = take_string(&mut body)?;
-                let _session_id = take_string(&mut body)?;
-                let _signature = take_string(&mut body)?;
-                let forwarding = *body.first().context("truncated session-bind")?;
-                self.forwarded |= forwarding != 0;
+            AgentRequest::SessionBind { forwarded } => {
+                self.forwarded |= forwarded;
                 Ok(vec![SUCCESS])
             }
-            // adding, removing and locking keys: keys get in by being written to a vault
-            _ => bail!("unsupported request"),
         }
     }
 
@@ -179,7 +207,8 @@ impl Connection {
     }
 }
 
-fn read_message(stream: &mut UnixStream) -> std::io::Result<Option<Vec<u8>>> {
+/// The next length-prefixed message; `None` at the end, or for a length out of bounds.
+pub fn read_message(stream: &mut impl Read) -> std::io::Result<Option<Vec<u8>>> {
     let mut length = [0u8; 4];
     match stream.read_exact(&mut length) {
         Ok(()) => {}

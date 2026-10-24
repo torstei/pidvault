@@ -26,6 +26,7 @@
 - None of the daemon's memory is swapped out any more, not only the buffers holding
   decrypted vaults. `create --from` and `add-key` hold what they read in wiped, locked
   memory as well.
+- Fuzz targets for everything other processes can hand the daemon, run in CI.
 - Every `unsafe` block states why it is sound, checked by clippy. The daemon checks the
   file descriptors it is handed by systemd and the mount helper instead of trusting them.
 

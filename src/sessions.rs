@@ -22,6 +22,12 @@ pub struct Sessions<H> {
     shells: HashMap<u32, Session<H>>,
 }
 
+impl<H: Liveness> Default for Sessions<H> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<H: Liveness> Sessions<H> {
     pub fn new() -> Self {
         Sessions {

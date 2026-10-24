@@ -1,0 +1,49 @@
+[package]
+name = "sshvault-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.5.0", features = ["derive"] }
+libfuzzer-sys = "0.4.13"
+serde_json = "1.0.154"
+sshvault = { path = ".." }
+
+[[bin]]
+name = "agent_message"
+path = "fuzz_targets/agent_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_toml"
+path = "fuzz_targets/agent_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_request"
+path = "fuzz_targets/control_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import"
+path = "fuzz_targets/import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_ops"
+path = "fuzz_targets/tree_ops.rs"
+test = false
+doc = false
+bench = false
