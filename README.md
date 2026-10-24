@@ -226,7 +226,10 @@ already unlocked see the new contents at once.
 - The client refuses a daemon that runs as your own uid or whose socket directory is not
   root's: such a daemon could be any of your processes, waiting for your passphrase.
 - Each vault is one file, `/var/lib/sshvault/<uid>/<name>.sshvault`, readable only by the
-  daemon. It holds a random 256-bit key K encrypted with your passphrase, and the contents
+  daemon. Vaults belong to the uid, as a home directory does: renaming an account keeps
+  them, and when an account is deleted its `/var/lib/sshvault/<uid>` should go with its
+  home directory, or a later account given the same uid will find them listed (though it
+  cannot open them). It holds a random 256-bit key K encrypted with your passphrase, and the contents
   encrypted with K, both in `age` passphrase format; one file, so a save replaces both in
   a single rename. Unlocking costs one scrypt run on your passphrase; saving costs almost
   nothing, since K needs no slow key derivation. Because only someone holding K can

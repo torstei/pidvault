@@ -300,7 +300,21 @@ fn with_vault<T>(
     let user = state
         .user_mut(peer.uid)
         .context("caller has no passwd entry")?;
-    f(user.vault_mut(name)?)
+    f(user.existing_vault_mut(name)?)
+}
+
+/// As `with_vault`, but also for a vault that is about to be created.
+fn with_new_vault<T>(
+    ctx: &Daemon,
+    peer: &procs::PeerCred,
+    name: &str,
+    f: impl FnOnce(&mut VaultState) -> Result<T>,
+) -> Result<T> {
+    let mut state = fs::lock(&ctx.state);
+    let user = state
+        .user_mut(peer.uid)
+        .context("caller has no passwd entry")?;
+    f(user.vault_or_new(name)?)
 }
 
 fn needs_unlock(name: &str) -> String {
@@ -345,7 +359,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 })?,
                 contents: key.seal_tree(&tree)?,
             };
-            with_vault(ctx, &peer, &name, |vault| {
+            with_new_vault(ctx, &peer, &name, |vault| {
                 let replacing = vault.exists();
                 if replacing && vault.unlocked_ancestor(peer.pid).is_none() {
                     bail!("replacing `{name}` {}", needs_unlock(&name));
