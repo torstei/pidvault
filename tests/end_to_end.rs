@@ -5,7 +5,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_sshvault");
-const PASSPHRASE: &str = "correct horse";
+const PASSPHRASE: &str = "correct horse battery staple";
 
 struct Fixture {
     dir: tempfile::TempDir,
@@ -69,6 +69,8 @@ impl Fixture {
 
     fn stop_daemon(&mut self) {
         if let Some(mut daemon) = self.daemon.take() {
+            // SAFETY: kill has no memory-safety preconditions; the child is not yet reaped,
+            // so its pid cannot have been reused
             unsafe { libc::kill(daemon.id() as i32, libc::SIGTERM) };
             let _ = daemon.wait();
         }
@@ -367,7 +369,7 @@ fn passwd_changes_the_passphrase_and_keeps_unsaved_edits() {
         return;
     };
     let o = f.unlocked_shell(
-        "echo '  Port 2222' >> \"$MNT/config\" && printf '%s\\n%s\\n' \"$PW\" new-pass | \"$SV\" passwd --passphrase-stdin",
+        "echo '  Port 2222' >> \"$MNT/config\" && printf '%s\\n%s\\n' \"$PW\" 'new passphrase here' | \"$SV\" passwd --passphrase-stdin",
     );
     assert!(o.status.success(), "{o:?}");
     f.wait_until_locked();
@@ -378,7 +380,7 @@ fn passwd_changes_the_passphrase_and_keeps_unsaved_edits() {
     assert!(stderr_of(&old).contains("wrong passphrase"), "{old:?}");
     std::thread::sleep(Duration::from_millis(1200));
     let o = f.outsider(
-        "echo new-pass | \"$SV\" unlock --passphrase-stdin >/dev/null && cat \"$MNT/config\"",
+        "echo 'new passphrase here' | \"$SV\" unlock --passphrase-stdin >/dev/null && cat \"$MNT/config\"",
     );
     assert_eq!(stdout(&o), format!("{CONFIG}  Port 2222\n"));
 }
@@ -785,6 +787,8 @@ fn an_orphaned_unlock_does_not_unlock_its_adopter() {
         .env("FIFO", f.path("fifo"))
         .env("OUT", f.path("unlock.out"))
         .args(["-c", script]);
+    // SAFETY: between fork and exec the closure calls only setsid and prctl, which are
+    // async-signal-safe, and allocates nothing
     unsafe {
         adopter.pre_exec(|| {
             libc::setsid();
@@ -806,6 +810,7 @@ fn an_orphaned_unlock_does_not_unlock_its_adopter() {
 }
 
 fn uid() -> u32 {
+    // SAFETY: getuid has no preconditions
     unsafe { libc::getuid() }
 }
 
@@ -1014,6 +1019,26 @@ fn create_with_no_unlock_leaves_the_shell_locked() {
     ));
     assert_eq!(o.status.code(), Some(1), "{o:?}");
     assert!(stdout(&o).starts_with("default: locked here"), "{o:?}");
+}
+
+/// New passphrases need 15 characters, whether set by create or by passwd; the passwd
+/// check is the daemon's, so a client that skips its own still meets it.
+#[test]
+fn short_new_passphrases_are_refused() {
+    let Some(f) = Fixture::start_empty() else {
+        return;
+    };
+    let o =
+        f.outsider("echo 'fourteen chars' | \"$SV\" create --passphrase-stdin --work-factor 10");
+    assert!(!o.status.success(), "{o:?}");
+    assert!(stderr_of(&o).contains("at least 15 characters"), "{o:?}");
+
+    let o = f.outsider(&format!(
+        "echo '{PASSPHRASE}' | \"$SV\" create --passphrase-stdin --work-factor 10 >/dev/null && \
+         printf '%s\\n%s\\n' '{PASSPHRASE}' 'fourteen chars' | \"$SV\" passwd --passphrase-stdin"
+    ));
+    assert!(!o.status.success(), "{o:?}");
+    assert!(stderr_of(&o).contains("at least 15 characters"), "{o:?}");
 }
 
 #[test]

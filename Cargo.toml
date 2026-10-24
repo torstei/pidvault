@@ -33,6 +33,9 @@ zeroize = { version = "1.9.1", features = ["serde"] }
 clap_mangen = "0.3.3"
 tempfile = "3.27.0"
 
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
 [package.metadata.deb]
 extended-description = """\
 A shell that has run `sshvault unlock`, and every process it starts, sees the \

@@ -62,6 +62,7 @@ pub fn mount_helper(mount: &Path) -> Result<()> {
 
 fn unmount(mount: &Path) {
     if let Ok(path) = std::ffi::CString::new(mount.as_os_str().as_encoded_bytes()) {
+        // SAFETY: path is a NUL-terminated string that outlives the call
         unsafe { libc::umount2(path.as_ptr(), libc::MNT_DETACH) };
     }
 }
@@ -84,6 +85,7 @@ fn mount_fuse(mount: &Path) -> Result<std::os::fd::OwnedFd> {
         "fd={},rootmode=40755,user_id=0,group_id=0,allow_other,default_permissions",
         std::os::fd::AsRawFd::as_raw_fd(&fuse)
     ))?;
+    // SAFETY: every pointer is to a NUL-terminated string that outlives the call
     let rc = unsafe {
         libc::mount(
             c"sshvault".as_ptr(),
@@ -103,6 +105,7 @@ fn mount_fuse(mount: &Path) -> Result<std::os::fd::OwnedFd> {
 pub fn run(options: &Options) -> Result<()> {
     // blocked before any thread exists so that only sigtimedwait below receives them
     let signals = block_termination_signals()?;
+    // SAFETY: getuid and getgid have no preconditions
     let (owner_uid, owner_gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let state: Shared = Arc::new(Mutex::new(State::new(options.state_dir.clone())));
     let fs = VaultFs::new(state.clone(), owner_uid, owner_gid);
@@ -408,6 +411,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             old,
             new,
         } => {
+            vault::check_new_passphrase(&new)?;
             let wrapped_key = with_vault(ctx, &peer, &name, |vault| match &vault.open {
                 Some(open) => Ok(open.wrapped_key.clone()),
                 None => Ok(Stored::read(&vault.path)
@@ -583,6 +587,7 @@ fn bind_socket(path: &Path) -> Result<UnixListener> {
 }
 
 fn block_termination_signals() -> Result<libc::sigset_t> {
+    // SAFETY: set is initialised by sigemptyset before any other use and outlives each call
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
@@ -605,5 +610,6 @@ fn wait_for_signal(set: &libc::sigset_t, timeout: Duration) -> bool {
         tv_sec: timeout.as_secs() as libc::time_t,
         tv_nsec: timeout.subsec_nanos() as libc::c_long,
     };
+    // SAFETY: set and ts outlive the call; a null siginfo pointer is allowed
     unsafe { libc::sigtimedwait(set, std::ptr::null_mut(), &ts) > 0 }
 }

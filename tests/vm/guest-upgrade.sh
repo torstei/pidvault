@@ -5,6 +5,8 @@ set -uo pipefail
 
 DEB=$1
 SEED=$(dirname "$DEB")
+# shorter than a new passphrase may be: vaults made before the minimum must keep opening
+PASS_SUFFIX=-pass
 . "$SEED/lib.sh"
 
 skip_all() {
