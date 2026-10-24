@@ -1,5 +1,7 @@
 # sshvault
 
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15864/badge)](https://www.bestpractices.dev/projects/15864)
+
 Per-shell access to an encrypted SSH configuration directory.
 
 ## The problem
