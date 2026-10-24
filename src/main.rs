@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
 use sshvault::protocol::{Request, Response};
-use sshvault::{daemon, fs, keys, protocol, secret, tree, vault};
+use sshvault::{daemon, fs, keys, procs, protocol, secret, tree, vault};
 
 /// Per-shell access to an encrypted SSH configuration directory.
 #[derive(Parser)]
@@ -203,6 +203,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     "you already have a vault `{vault}`; to replace it, `sshvault import` an exported one"
                 );
             }
+            if !no_unlock {
+                procs::check_tracing_restricted()?;
+            }
             let passphrase = if passphrase_stdin {
                 passphrase_from_stdin()?
             } else {
@@ -269,6 +272,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             for_,
             passphrase_stdin,
         } => {
+            procs::check_tracing_restricted()?;
             let passphrase = if passphrase_stdin {
                 passphrase_from_stdin()?
             } else {
@@ -355,6 +359,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             passphrase_stdin,
         } => {
             fs::check_vault_name(&vault)?;
+            if !no_unlock {
+                procs::check_tracing_restricted()?;
+            }
             let ciphertext = read_limited(&file)?;
             vault::check_sealed(&ciphertext)
                 .with_context(|| format!("{} is not an exported vault", file.display()))?;

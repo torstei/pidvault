@@ -64,6 +64,9 @@ jobs:
         run: |
           command -v cargo-deny || cargo install cargo-deny --locked
           cargo deny check
+      # sshvault refuses to unlock where any process could trace an unlocked shell
+      - name: Restrict ptrace as Ubuntu does by default
+        run: sudo sysctl -w kernel.yama.ptrace_scope=1
       - run: cargo test
 
   vm:
