@@ -51,8 +51,16 @@ jobs:
           mv sshvault.cdx.json dist/
           rustc --version > dist/rustc-version.txt
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: provenance
         with:
           subject-path: dist/*.deb
+      # beside the package in the release, where verifiers and Scorecard look for it
+      - name: Keep the provenance bundle
+        env:
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          deb=$(basename dist/*.deb)
+          cp "$BUNDLE" "dist/$deb.sigstore.json"
       - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: dist/*.deb
@@ -60,7 +68,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: deb
-          path: dist/*.deb
+          path: dist/
           if-no-files-found: error
 
   # The only job that can reach the signing key; the release environment makes it wait
@@ -84,7 +92,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.deb dist/sshvault.cdx.json --verify-tag \
+          gh release create "$GITHUB_REF_NAME" dist/*.deb dist/*.sigstore.json dist/sshvault.cdx.json --verify-tag \
             --title "$GITHUB_REF_NAME" --notes "See [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md).
           Built reproducibly with $(cat dist/rustc-version.txt)."
       - name: Collect every released package

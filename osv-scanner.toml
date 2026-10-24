@@ -1,0 +1,11 @@
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+reason = "RSA signing in the agent is blinded (keys.rs); no fixed rsa release exists"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0374"
+reason = "basic-toml is unmaintained, reached only through age's translations; no replacement upstream"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0387"
+reason = "crypto-bigint 0.5 is left for public-key operations; the agent signs ECDSA with p256/p384 0.14 (keys.rs)"

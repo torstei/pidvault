@@ -283,7 +283,8 @@ VM's second serial port.
 `packaging/` has the systemd units — the daemon and its sockets, and the mount helper and
 its socket — and the `sysusers.d` entry for the `sshvault` account.
 
-`cargo deny check` (configured in `deny.toml`) checks dependencies against the RustSec
+`cargo deny check` (configured in `deny.toml`, whose accepted advisories
+`osv-scanner.toml` repeats for Scorecard) checks dependencies against the RustSec
 advisories, the allowed licenses and crates.io as the only source; CI runs it, and lintian on
 the package. `packaging/sshvault.1` and `packaging/changelog.Debian` are generated: tests
 fail when they are stale and say how to regenerate them.
@@ -299,7 +300,8 @@ environment before it creates the GitHub release, signs the apt repository (buil
 Only that approved job can reach the signing key.
 
 Anyone can check a downloaded package with `gh attestation verify sshvault_X.Y.Z-1_amd64.deb
---repo torstei/sshvault`, or rebuild it from the tag and compare: with the Rust version
+--repo torstei/sshvault`, adding `--bundle` with the release's `.sigstore.json` to check it
+without asking GitHub, or rebuild it from the tag and compare: with the Rust version
 named in the release notes, `SOURCE_DATE_EPOCH` set to the tagged commit's time
 (`git log -1 --format=%ct`), `cargo auditable build --release --locked` and
 `cargo deb --no-build`.
