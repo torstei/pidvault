@@ -2127,7 +2127,7 @@ dependencies = [
  "cipher",
  "ctr",
  "poly1305",
- "ssh-encoding",
+ "ssh-encoding 0.2.0",
  "subtle",
 ]
 
@@ -2140,6 +2140,15 @@ dependencies = [
  "base64ct",
  "pem-rfc7468",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "ssh-encoding"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b54d0ed0498daf3f78d82e00e28c8eec9d75a067c4cfbcc7a0f7d0f4077749e"
+dependencies = [
+ "base64ct",
 ]
 
 [[package]]
@@ -2160,7 +2169,7 @@ dependencies = [
  "sha2 0.10.9",
  "signature 2.2.0",
  "ssh-cipher",
- "ssh-encoding",
+ "ssh-encoding 0.2.0",
  "subtle",
  "zeroize",
 ]
@@ -2183,9 +2192,9 @@ dependencies = [
  "rsa",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "signature 2.2.0",
- "ssh-encoding",
+ "sha2 0.11.1",
+ "signature 3.0.0",
+ "ssh-encoding 0.3.0",
  "ssh-key",
  "tar",
  "tempfile",
