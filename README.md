@@ -286,6 +286,14 @@ and checks that the vault, its keys and the agent still work. It skips the upgra
 nothing older than the package under test is published. Results come back as TAP on each
 VM's second serial port.
 
+`fuzz/` holds cargo-fuzz targets for what other processes can hand the daemon: agent
+messages, control requests, imported archives and stored vault files, `agent.toml`, and
+any sequence of file operations through the mount (which must leave the vault savable
+and never make a key readable). They need a nightly toolchain:
+`cargo +nightly fuzz run tree_ops`, with `fuzz/seeds/<target>` as an extra corpus
+directory where there is one. CI fuzzes each target for two minutes on every change and
+for half an hour weekly, keeping the corpus between runs.
+
 `packaging/` has the systemd units — the daemon and its sockets, and the mount helper and
 its socket — and the `sysusers.d` entry for the `sshvault` account.
 

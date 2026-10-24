@@ -8,7 +8,7 @@ use ssh_key::{Algorithm, EcdsaCurve, HashAlg, Mpint, PrivateKey, Signature};
 /// The opening of every unencrypted OpenSSH private key: the armour line, then the start
 /// of the encoded header naming cipher and KDF "none". It holds nothing secret, so a file
 /// is recognised as a key before any secret part of it has been written.
-const PLAIN_OPENSSH_KEY: &[u8] =
+pub const PLAIN_OPENSSH_KEY: &[u8] =
     b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ";
 
 /// A key is never readable through the mount, only usable through the agent.
