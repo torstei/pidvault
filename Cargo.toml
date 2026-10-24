@@ -33,8 +33,9 @@ tempfile = "3.27.0"
 [package.metadata.deb]
 extended-description = """\
 A shell that has run `sshvault unlock`, and every process it starts, sees the \
-decrypted SSH config and keys under /run/sshvault/self. Every other process of \
-the same user sees an empty directory."""
+decrypted SSH config under /run/sshvault/<vault> and can use its keys through \
+the vault agent, which never hands them out. Every other process of the same \
+user sees nothing."""
 section = "net"
 depends = "$auto"
 assets = [["target/release/sshvault", "usr/bin/", "755"], ["README.md", "usr/share/doc/sshvault/README.md", "644"]]
