@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 - 2026-10-24
+
+- The first release of the 0.3 changes in the apt repository: publishing 0.3.0 stopped
+  after the GitHub release. Release packages are built on Ubuntu 24.04, the oldest
+  Ubuntu they support.
+
 ## 0.3.0 - 2026-10-24
 
 - The daemon no longer starts as root. It runs as `sshvault` from the start, with no
