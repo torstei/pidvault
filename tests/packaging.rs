@@ -84,3 +84,30 @@ fn the_debian_changelog_is_up_to_date() {
         "packaging/changelog.Debian is stale; run SSHVAULT_WRITE_CHANGELOG=1 cargo test --test packaging"
     );
 }
+
+/// deny.toml serves cargo deny, osv-scanner.toml serves Scorecard and OSV; an advisory
+/// accepted in one and not the other would fail one of them.
+#[test]
+fn both_scanners_accept_the_same_advisories() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read = |name: &str| -> toml::Table {
+        std::fs::read_to_string(root.join(name))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let ids = |entries: &toml::Value| -> Vec<String> {
+        let mut ids: Vec<String> = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        ids(&read("deny.toml")["advisories"]["ignore"]),
+        ids(&read("osv-scanner.toml")["IgnoredVulns"])
+    );
+}
