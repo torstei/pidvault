@@ -545,6 +545,58 @@ fn real_ssh_login_uses_the_vault_key_only_from_the_unlocked_shell() {
 }
 
 #[test]
+fn openssh_accepts_the_agents_ecdsa_signatures() {
+    let keys = tempfile::tempdir().unwrap();
+    let mut files = Vec::new();
+    let mut authorized = String::new();
+    for bits in ["256", "384"] {
+        let key = keys.path().join(format!("id_p{bits}"));
+        assert!(
+            Command::new("ssh-keygen")
+                .args(["-q", "-t", "ecdsa", "-b", bits, "-N", "", "-f"])
+                .arg(&key)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        files.push((
+            format!("id_p{bits}"),
+            std::fs::read_to_string(&key).unwrap(),
+        ));
+        files.push((format!("id_p{bits}.pub"), public.clone()));
+        authorized.push_str(&public);
+    }
+    let Some(sshd) = start_sshd(keys.path(), &authorized) else {
+        return;
+    };
+    let user = std::env::var("USER").unwrap();
+    let config = format!(
+        "Host p256 p384\n  HostName 127.0.0.1\n  Port {}\n  User {user}\n  IdentityFile @MNT@/id_%n\n  \
+         IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking no\n  \
+         UserKnownHostsFile /dev/null\n  LogLevel ERROR\n",
+        sshd.port
+    );
+    let mut contents: Vec<(&str, &str)> = vec![("config", &config)];
+    contents.extend(
+        files
+            .iter()
+            .map(|(name, key)| (name.as_str(), key.as_str())),
+    );
+    let Some(f) = Fixture::start(&contents) else {
+        return;
+    };
+    let stub = write_stub(&f);
+    for host in ["p256", "p384"] {
+        let login = f.unlocked_shell(&format!(
+            "for i in 1 2 3 4 5; do ssh -F {} {host} echo logged-in || exit 1; done | uniq -c",
+            stub.display()
+        ));
+        assert_eq!(stdout(&login).trim(), "5 logged-in", "{host}: {login:?}");
+    }
+}
+
+#[test]
 fn client_refuses_a_daemon_running_as_its_own_user() {
     let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
         return;

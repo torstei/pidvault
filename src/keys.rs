@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, bail};
+use p256::ecdsa::signature::Signer as _;
 use signature::{RandomizedSigner, Signer};
 use ssh_encoding::Encode;
-use ssh_key::private::KeypairData;
-use ssh_key::{Algorithm, HashAlg, PrivateKey, Signature};
+use ssh_key::private::{EcdsaKeypair, KeypairData};
+use ssh_key::{Algorithm, EcdsaCurve, HashAlg, Mpint, PrivateKey, Signature};
 
 /// The opening of every unencrypted OpenSSH private key: the armour line, then the start
 /// of the encoded header naming cipher and KDF "none". It holds nothing secret, so a file
@@ -84,6 +85,28 @@ impl AgentKey {
                 rsa_sign::<sha2::Sha256>(rsa, data, HashAlg::Sha256)?
             }
             KeypairData::Rsa(_) => bail!("refusing SHA-1 RSA signatures"),
+            // not ssh-key's own ECDSA signing: its p256/p384 arithmetic is not constant-time
+            // (RUSTSEC-2026-0387), and anything in an unlocked shell may time as many
+            // signatures as it likes
+            KeypairData::Ecdsa(EcdsaKeypair::NistP256 { private, .. }) => {
+                let key = p256::ecdsa::SigningKey::from_slice(private.as_slice())?;
+                let raw: p256::ecdsa::Signature = key.try_sign(data)?;
+                ecdsa_signature(
+                    EcdsaCurve::NistP256,
+                    &raw.r().to_bytes(),
+                    &raw.s().to_bytes(),
+                )?
+            }
+            KeypairData::Ecdsa(EcdsaKeypair::NistP384 { private, .. }) => {
+                let key = p384::ecdsa::SigningKey::from_slice(private.as_slice())?;
+                let raw: p384::ecdsa::Signature = key.try_sign(data)?;
+                ecdsa_signature(
+                    EcdsaCurve::NistP384,
+                    &raw.r().to_bytes(),
+                    &raw.s().to_bytes(),
+                )?
+            }
+            KeypairData::Ecdsa(_) => bail!("unsupported ECDSA curve"),
             _ => self.private.try_sign(data)?,
         };
         Ok(signature.encode_vec()?)
@@ -119,6 +142,13 @@ where
     )?)
 }
 
+fn ecdsa_signature(curve: EcdsaCurve, r: &[u8], s: &[u8]) -> Result<Signature> {
+    let mut blob = Vec::new();
+    Mpint::from_positive_bytes(r)?.encode(&mut blob)?;
+    Mpint::from_positive_bytes(s)?.encode(&mut blob)?;
+    Ok(Signature::new(Algorithm::Ecdsa { curve }, blob)?)
+}
+
 trait EncodeVec {
     fn encode_vec(&self) -> ssh_encoding::Result<Vec<u8>>;
 }
@@ -135,12 +165,19 @@ impl<T: Encode> EncodeVec for T {
 mod tests {
     use super::*;
     use signature::Verifier;
+    use ssh_encoding::Decode;
     use std::process::Command;
 
+    /// `kind` is an ssh-keygen type, optionally with a size: `ecdsa:384`.
     fn keygen(kind: &str, passphrase: &str) -> Vec<u8> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("key");
-        let status = Command::new("ssh-keygen")
+        let (kind, bits) = kind.split_once(':').unwrap_or((kind, ""));
+        let mut keygen = Command::new("ssh-keygen");
+        if !bits.is_empty() {
+            keygen.args(["-b", bits]);
+        }
+        let status = keygen
             .args(["-q", "-t", kind, "-N", passphrase, "-C", "test", "-f"])
             .arg(&path)
             .status()
@@ -167,6 +204,7 @@ mod tests {
         for (kind, flags) in [
             ("ed25519", 0),
             ("ecdsa", 0),
+            ("ecdsa:384", 0),
             ("rsa", SSH_AGENT_RSA_SHA2_512),
             ("rsa", SSH_AGENT_RSA_SHA2_256),
         ] {
@@ -185,6 +223,32 @@ mod tests {
                 .key_data()
                 .verify(b"challenge", &signature)
                 .unwrap_or_else(|e| panic!("{kind}: {e}"));
+        }
+    }
+
+    /// About one ECDSA signature in 128 has an r or s with a leading zero byte, which must
+    /// be dropped from its mpint for OpenSSH to accept it.
+    #[test]
+    fn every_ecdsa_signature_verifies() {
+        for kind in ["ecdsa", "ecdsa:384"] {
+            let data = keygen(kind, "");
+            let key = AgentKey::parse(&data, "fallback").unwrap();
+            let public = PrivateKey::from_openssh(&data)
+                .unwrap()
+                .public_key()
+                .clone();
+            for n in 0..300u32 {
+                let message = n.to_be_bytes();
+                let signature = Signature::try_from(&key.sign(&message, 0).unwrap()[..]).unwrap();
+                let mut blob = signature.as_bytes();
+                for _ in 0..2 {
+                    let mpint = Mpint::decode(&mut blob).unwrap();
+                    if let [0, next, ..] = mpint.as_bytes() {
+                        assert!(*next >= 0x80, "{kind} {n}: padded mpint");
+                    }
+                }
+                public.key_data().verify(&message, &signature).unwrap();
+            }
         }
     }
 
