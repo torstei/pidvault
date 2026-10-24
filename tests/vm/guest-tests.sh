@@ -23,6 +23,8 @@ check "daemon runs as the sshvault account" equals "$(ps -o user= -p "$(daemon_p
 check "the daemon holds no capabilities" live_daemon caps_dropped
 check "the daemon has no network of its own" live_daemon own_network
 check "the daemon cannot see /home" live_daemon no_home
+check "the daemon's memory is never swapped out" equals \
+    "$(cat "/sys/fs/cgroup$(systemctl show -P ControlGroup sshvault)/memory.swap.max")" 0
 check "the mount helper may hold no capability but CAP_SYS_ADMIN" sh -c \
     'pid=$(systemctl show --property MainPID --value sshvault-mount); [ "$pid" -gt 0 ] && grep -q "^CapBnd:[[:space:]]*0000000000200000$" /proc/$pid/status'
 check "systemd rates the service's exposure below 2" \
@@ -60,14 +62,14 @@ as alice sh -c '
     sshvault stub > ~/.ssh/config
 '
 check "alice creates a vault" as alice sh -c \
-    'echo alice-pass | sshvault create --passphrase-stdin --work-factor 12 --from ~/src && rm ~/src/id_vm'
+    'echo alice-secret-phrase | sshvault create --passphrase-stdin --work-factor 12 --from ~/src && rm ~/src/id_vm'
 ALICE_VAULT="/var/lib/sshvault/$(id -u alice)/default.sshvault"
 check "alice's vault is stored by the daemon" equals "$(stat -c '%U %a' "$ALICE_VAULT")" "sshvault 600"
 check "alice cannot read her stored vault" refused as alice cat "$ALICE_VAULT"
 
 as bob sh -c 'mkdir -p ~/src && printf "Host vm\n  User bob-from-vault\n" > ~/src/config'
 check "bob creates a vault" as bob sh -c \
-    'echo bob-pass | sshvault create --passphrase-stdin --work-factor 12 --from ~/src'
+    'echo bob-secret-phrase | sshvault create --passphrase-stdin --work-factor 12 --from ~/src'
 
 # --- access -----------------------------------------------------------------
 
@@ -81,14 +83,14 @@ check "another process of alice sees nothing" refused as alice cat /run/sshvault
 check "alice's user services see nothing" refused in_manager alice --wait --pipe cat /run/sshvault/default/config
 check "bob's unlocked shell sees only his own vault" unlocked bob 'grep -q bob-from-vault /run/sshvault/default/config'
 check "root sees nothing" refused cat /run/sshvault/default/config
-as alice sh -c 'echo work-pass | sshvault create work --no-unlock --passphrase-stdin --work-factor 12 >/dev/null'
+as alice sh -c 'echo work-secret-phrase | sshvault create work --no-unlock --passphrase-stdin --work-factor 12 >/dev/null'
 check "a shell unlocked for one vault sees only that one" as alice sh -c \
-    'echo work-pass | sshvault unlock work --passphrase-stdin >/dev/null && test -d /run/sshvault/work && ! cat /run/sshvault/default/config 2>/dev/null'
+    'echo work-secret-phrase | sshvault unlock work --passphrase-stdin >/dev/null && test -d /run/sshvault/work && ! cat /run/sshvault/default/config 2>/dev/null'
 check "alice lists only her own vaults" equals "$(as alice ls /run/sshvault | tr '\n' ' ')" "default work "
 check "bob lists only his" equals "$(as bob ls /run/sshvault | tr '\n' ' ')" "default "
 check "a vault name only alice has does not exist for bob" refused as bob stat /run/sshvault/work
 check "bob cannot unlock alice's vault by its name" sh -c \
-    'runuser -u bob -- sh -c "echo work-pass | sshvault unlock work --passphrase-stdin" 2>&1 | grep -q "you have no vault"'
+    'runuser -u bob -- sh -c "echo work-secret-phrase | sshvault unlock work --passphrase-stdin" 2>&1 | grep -q "you have no vault"'
 check "decrypted vault is held in locked memory" \
     awk '/^VmLck:/ { exit !($2 > 0) }' "/proc/$(daemon_pid)/status"
 
@@ -115,15 +117,15 @@ as alice ssh-keygen -q -t ed25519 -N 'key secret' -C old-github -f /tmp/alice-ol
 check "add-key brings a protected key in, protected and offered by the agent" unlocked alice \
     "echo 'key secret' | sshvault add-key --passphrase-stdin --name id_github /tmp/alice-old-key >/dev/null && ! cat /run/sshvault/default/id_github 2>/dev/null && SSH_AUTH_SOCK=/run/sshvault-agent.sock ssh-add -l | grep -q old-github"
 check "export needs an unlocked shell" refused as alice sh -c \
-    'echo alice-pass | sshvault export --passphrase-stdin /tmp/alice-denied.age'
+    'echo alice-secret-phrase | sshvault export --passphrase-stdin /tmp/alice-denied.age'
 check "alice exports her vault from an unlocked shell" unlocked alice \
-    'echo alice-pass | sshvault export --passphrase-stdin /tmp/alice-export.age'
+    'echo alice-secret-phrase | sshvault export --passphrase-stdin /tmp/alice-export.age'
 useradd --create-home --shell /bin/bash carol
 install -o carol -m 600 /tmp/alice-export.age /tmp/carol-import.age
 check "carol imports alice's export" as carol sh -c \
-    'echo alice-pass | sshvault import --passphrase-stdin /tmp/carol-import.age'
+    'echo alice-secret-phrase | sshvault import --passphrase-stdin /tmp/carol-import.age'
 check "the imported vault works for a user with another name" as carol sh -c \
-    'echo alice-pass | sshvault unlock --passphrase-stdin >/dev/null && grep -q id_vm /run/sshvault/default/config'
+    'echo alice-secret-phrase | sshvault unlock --passphrase-stdin >/dev/null && grep -q id_vm /run/sshvault/default/config'
 
 # an orphaned client is adopted by alice's systemd --user, the subreaper of her whole login
 as alice mkfifo /tmp/orphan-fifo
@@ -137,7 +139,7 @@ for _ in $(seq 50); do
     sleep 0.1
 done
 check "the orphaned client was adopted by alice's systemd --user" test -n "$orphan"
-as alice sh -c 'echo alice-pass > /tmp/orphan-fifo'
+as alice sh -c 'echo alice-secret-phrase > /tmp/orphan-fifo'
 for _ in $(seq 50); do [[ -s /tmp/orphan.out ]] && break; sleep 0.1; done
 check "an orphaned unlock is refused" grep -q "directly from the shell" /tmp/orphan.out
 check "alice's user services still see nothing" refused in_manager alice --wait --pipe cat /run/sshvault/default/config

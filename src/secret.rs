@@ -14,8 +14,9 @@ pub struct SecretBuf {
     mapped: usize,
 }
 
-// the mapping is owned exclusively and never aliased
+// SAFETY: the mapping is owned exclusively and never aliased; shared access only reads
 unsafe impl Send for SecretBuf {}
+// SAFETY: as for Send; mutation needs &mut
 unsafe impl Sync for SecretBuf {}
 
 impl SecretBuf {
@@ -25,8 +26,10 @@ impl SecretBuf {
                 "secret larger than {MAX_SECRET} bytes"
             )));
         }
+        // SAFETY: sysconf has no preconditions
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
         let mapped = capacity.max(1).div_ceil(page) * page;
+        // SAFETY: a fresh anonymous mapping, which aliases nothing
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -45,6 +48,7 @@ impl SecretBuf {
             len: 0,
             mapped,
         };
+        // SAFETY: ptr..ptr+mapped is the mapping just made; buf's Drop unmaps it on error
         unsafe {
             if libc::mlock(ptr, mapped) != 0 {
                 let err = io::Error::last_os_error();
@@ -91,6 +95,7 @@ impl SecretBuf {
             .checked_add(data.len())
             .ok_or_else(|| io::Error::other("offset overflow"))?;
         self.reserve(end)?;
+        // SAFETY: reserve made end <= mapped, and data cannot overlap a mapping only self owns
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.add(offset), data.len()) };
         self.len = self.len.max(end);
         Ok(())
@@ -98,6 +103,7 @@ impl SecretBuf {
 
     pub fn truncate(&mut self, len: usize) -> io::Result<()> {
         if len < self.len {
+            // SAFETY: len..self.len lies within the mapping and is uniquely borrowed here
             unsafe { std::slice::from_raw_parts_mut(self.ptr.add(len), self.len - len) }.zeroize();
         } else {
             self.reserve(len)?;
@@ -117,6 +123,7 @@ impl SecretBuf {
         if needed > self.mapped {
             let mut bigger =
                 SecretBuf::with_capacity(needed.max((self.mapped * 2).min(MAX_SECRET)))?;
+            // SAFETY: bigger's mapping is fresh and at least self.len long, self's is too
             unsafe { std::ptr::copy_nonoverlapping(self.ptr, bigger.ptr, self.len) };
             bigger.len = self.len;
             *self = bigger;
@@ -140,12 +147,14 @@ impl Deref for SecretBuf {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
+        // SAFETY: the first len bytes of the mapping are initialised and live as long as self
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 }
 
 impl Drop for SecretBuf {
     fn drop(&mut self) {
+        // SAFETY: the mapping is self's alone and is never touched again after this
         unsafe {
             std::slice::from_raw_parts_mut(self.ptr, self.mapped).zeroize();
             libc::munlock(self.ptr.cast(), self.mapped);

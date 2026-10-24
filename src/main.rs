@@ -220,11 +220,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 passphrase_from_stdin()?
             } else {
                 let first = prompt(&format!("New passphrase for `{vault}`: "))?;
+                vault::check_new_passphrase(&first)?;
                 if *first != *prompt("Repeat passphrase: ")? {
                     bail!("passphrases do not match");
                 }
                 first
             };
+            vault::check_new_passphrase(&passphrase)?;
             let secret = SecretString::from(passphrase.to_string());
             let sealed = match from {
                 Some(from) => {
@@ -325,6 +327,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 let old = prompt(&format!("Current passphrase for `{vault}`: "))?;
                 let new = prompt("New passphrase: ")?;
+                vault::check_new_passphrase(&new)?;
                 if *new != *prompt("Repeat new passphrase: ")? {
                     bail!("passphrases do not match");
                 }
@@ -424,7 +427,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     bail!("{} already exists", path.display());
                 }
             }
-            let data = read_limited(&file)?;
+            let data = secret::SecretBuf::from_reader(
+                std::fs::File::open(&file)
+                    .with_context(|| format!("opening {}", file.display()))?,
+                0,
+            )?;
             let key = keys::importable(&data, || {
                 if passphrase_stdin {
                     passphrase_from_stdin()
@@ -552,6 +559,7 @@ fn stub(mount: &Path, agent_socket: &Path) -> Result<String> {
 
 fn write_export(file: &Path, vault: &[u8]) -> Result<()> {
     if file == Path::new("-") {
+        // SAFETY: isatty takes any descriptor and has no other preconditions
         if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
             bail!("refusing to write a binary vault to a terminal; redirect stdout or name a file");
         }

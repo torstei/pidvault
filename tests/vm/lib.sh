@@ -1,6 +1,8 @@
 # Helpers shared by the guest scripts; sourced, prints TAP.
 
 n=0
+# what `unlocked` appends to the user name to get the vault passphrase
+PASS_SUFFIX=${PASS_SUFFIX:--secret-phrase}
 
 ok() { n=$((n + 1)); echo "ok $n - $1"; }
 not_ok() {
@@ -32,7 +34,7 @@ in_manager() {
 unlocked() {
     local user=$1
     shift
-    as "$user" sh -c "echo $user-pass | sshvault unlock --passphrase-stdin >/dev/null && $*"
+    as "$user" sh -c "echo $user$PASS_SUFFIX | sshvault unlock --passphrase-stdin >/dev/null && $*"
 }
 daemon_pid() { systemctl show --property MainPID --value sshvault; }
 # a check about the daemon process must fail, not pass, when there is none

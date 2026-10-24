@@ -231,8 +231,11 @@ already unlocked see the new contents at once.
   home directory, or a later account given the same uid will find them listed (though it
   cannot open them). It holds a random 256-bit key K encrypted with your passphrase, and the contents
   encrypted with K, both in `age` passphrase format; one file, so a save replaces both in
-  a single rename. Unlocking costs one scrypt run on your passphrase; saving costs almost
-  nothing, since K needs no slow key derivation. Because only someone holding K can
+  a single rename. Unlocking costs one scrypt run on your passphrase (cost 2^18, 256 MiB,
+  above OWASP's recommended minimum), so a stolen copy of the file costs an attacker that
+  much per guess; new passphrases need at least 15 characters, NIST's minimum for a
+  password that is the only factor. Saving costs almost nothing, since K needs no slow
+  key derivation. Because only someone holding K can
   produce contents that decrypt with it, nobody without K can plant a vault.
 - Every FUSE request carries the caller's pid and uid. Like `/proc/self`, a vault's path is
   the same for everyone: each user gets their own directory there (a separate inode, owned
@@ -245,6 +248,9 @@ already unlocked see the new contents at once.
 - Decrypted data and K exist only in the daemon's memory, in buffers locked against swap
   and excluded from core dumps (an unlock fails rather than hold them otherwise), and are
   wiped when that user's last unlocked shell exits — after any unsaved change is saved.
+  The rest of the daemon's memory, where a key is parsed for each signature and file
+  writes pass through, is kept out of swap too (`MemorySwapMax=0`), and the daemon cannot
+  be core-dumped or traced. Hibernation writes all memory to disk, this included.
   Unlocking another shell while one is open only checks the passphrase and keeps what is
   in memory.
 - The daemon is reachable by everyone, so it limits what anyone can make it do: passphrase

@@ -38,10 +38,12 @@ pub struct Pidfd(OwnedFd);
 
 impl Pidfd {
     pub fn open(pid: u32) -> io::Result<Pidfd> {
+        // SAFETY: pidfd_open takes only integers
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: a descriptor pidfd_open just opened for this process, owned by nothing else
         Ok(Pidfd(unsafe { OwnedFd::from_raw_fd(fd as i32) }))
     }
 }
@@ -51,6 +53,7 @@ impl Pidfd {
 pub fn peer_pidfd(stream: &UnixStream, pid: u32) -> io::Result<Pidfd> {
     let mut fd: libc::c_int = -1;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: fd and len outlive the call and len is fd's size
     let rc = unsafe {
         libc::getsockopt(
             stream.as_raw_fd(),
@@ -61,6 +64,7 @@ pub fn peer_pidfd(stream: &UnixStream, pid: u32) -> io::Result<Pidfd> {
         )
     };
     if rc == 0 && fd >= 0 {
+        // SAFETY: a descriptor the kernel just opened for this process, owned by nothing else
         return Ok(Pidfd(unsafe { OwnedFd::from_raw_fd(fd) }));
     }
     Pidfd::open(pid)
@@ -77,6 +81,7 @@ impl Liveness for Pidfd {
             events: libc::POLLIN,
             revents: 0,
         };
+        // SAFETY: pfd outlives the call and the count is 1
         let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
         ready != 0
     }
@@ -94,6 +99,7 @@ pub fn peer_cred(stream: &UnixStream) -> io::Result<PeerCred> {
         gid: 0,
     };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: cred and len outlive the call and len is cred's size
     let rc = unsafe {
         libc::getsockopt(
             stream.as_raw_fd(),
@@ -115,6 +121,7 @@ pub fn peer_cred(stream: &UnixStream) -> io::Result<PeerCred> {
 /// Keeps other processes out of this one's memory; refuses to continue if already traced.
 pub fn harden() -> io::Result<()> {
     // also suppresses core dumps, which would hold decrypted vaults
+    // SAFETY: PR_SET_DUMPABLE takes only integers
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
         return Err(io::Error::last_os_error());
     }

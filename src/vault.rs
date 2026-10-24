@@ -4,15 +4,15 @@ use std::path::{Path, PathBuf};
 
 use age::secrecy::SecretString;
 use anyhow::{Context, Result, bail};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 use crate::secret::SecretBuf;
 use crate::tree::Tree;
 
 /// Archives the regular files and directories below `dir`, following symlinks.
 /// Anything else (sockets, fifos, devices) is left out and returned.
-pub fn pack_dir(dir: &Path) -> Result<(Zeroizing<Vec<u8>>, Vec<PathBuf>)> {
-    let mut builder = tar::Builder::new(Vec::new());
+fn pack_dir(dir: &Path) -> Result<(SecretBuf, Vec<PathBuf>)> {
+    let mut builder = tar::Builder::new(SecretBuf::with_capacity(0)?);
     let mut skipped = Vec::new();
     let mut pending = vec![PathBuf::new()];
     while let Some(rel) = pending.pop() {
@@ -34,7 +34,7 @@ pub fn pack_dir(dir: &Path) -> Result<(Zeroizing<Vec<u8>>, Vec<PathBuf>)> {
             }
         }
     }
-    Ok((Zeroizing::new(builder.into_inner()?), skipped))
+    Ok((builder.into_inner()?, skipped))
 }
 
 /// Encrypts `dir` with a passphrase, as an export would be, returning it with the
@@ -56,6 +56,17 @@ pub const PASSPHRASE_WORK_FACTOR: u8 = 18;
 /// The highest scrypt cost spent on decrypting a file: anyone may hand the daemon one, and
 /// each step up doubles the memory (2^20 takes 1 GiB).
 pub const MAX_WORK_FACTOR: u8 = 20;
+
+/// Shortest new passphrase accepted: NIST SP 800-63B-4's minimum for a password that is
+/// the only factor, which it is for anyone holding a copy of the vault file.
+pub const MIN_PASSPHRASE_CHARS: usize = 15;
+
+pub fn check_new_passphrase(passphrase: &str) -> Result<()> {
+    if passphrase.chars().count() < MIN_PASSPHRASE_CHARS {
+        bail!("a passphrase needs at least {MIN_PASSPHRASE_CHARS} characters");
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct WrongPassphrase;
