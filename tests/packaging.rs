@@ -3,28 +3,31 @@ use std::path::Path;
 const MAINTAINER: &str = "Torstein Tauno Svendsen <torstei@gmail.com>";
 
 /// The package's Debian-format changelog, one entry per dated release heading in
-/// CHANGELOG.md, newest first.
+/// CHANGELOG.md, newest first. Releases are dated noon, a minute later for each earlier
+/// release that day, since every entry needs a later time than the one before it.
 fn debian_changelog(changelog: &str) -> String {
+    let releases: Vec<(&str, &str)> = changelog
+        .lines()
+        .filter_map(|line| line.strip_prefix("## ")?.split_once(" - "))
+        .collect();
     let mut out = String::new();
-    for line in changelog.lines() {
-        let Some(heading) = line.strip_prefix("## ") else {
-            continue;
-        };
-        let Some((version, date)) = heading.split_once(" - ") else {
-            continue;
-        };
+    for (index, &(version, date)) in releases.iter().enumerate() {
         let [year, month, day] = date
             .split('-')
             .map(|part| part.parse::<i64>().expect("release date as YYYY-MM-DD"))
             .collect::<Vec<_>>()[..]
         else {
-            panic!("release date as YYYY-MM-DD: {heading}");
+            panic!("release date as YYYY-MM-DD: {version} - {date}");
         };
+        let earlier_that_day = releases[index + 1..]
+            .iter()
+            .filter(|&&(_, other)| other == date)
+            .count() as i64;
         out.push_str(&format!(
             "sshvault ({version}-1) stable; urgency=medium\n\n  \
              * Release {version}; see changelog.gz in this directory.\n\n \
              -- {MAINTAINER}  {}\n\n",
-            rfc2822_noon(year, month, day)
+            rfc2822(year, month, day, earlier_that_day)
         ));
     }
     out.truncate(out.trim_end().len());
@@ -32,7 +35,8 @@ fn debian_changelog(changelog: &str) -> String {
     out
 }
 
-fn rfc2822_noon(year: i64, month: i64, day: i64) -> String {
+/// Noon plus `minutes` on the given day.
+fn rfc2822(year: i64, month: i64, day: i64, minutes: i64) -> String {
     const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -48,20 +52,38 @@ fn rfc2822_noon(year: i64, month: i64, day: i64) -> String {
     let doy = (153 * m + 2) / 5 + day - 1;
     let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
     format!(
-        "{}, {day:02} {} {year} 12:00:00 +0000",
+        "{}, {day:02} {} {year} {:02}:{:02}:00 +0000",
         WEEKDAYS[days.rem_euclid(7) as usize],
-        MONTHS[(month - 1) as usize]
+        MONTHS[(month - 1) as usize],
+        12 + minutes / 60,
+        minutes % 60
     )
 }
 
 #[test]
 fn release_dates_get_their_weekday() {
-    assert_eq!(
-        rfc2822_noon(2026, 10, 23),
-        "Fri, 23 Oct 2026 12:00:00 +0000"
+    assert_eq!(rfc2822(2026, 10, 23, 0), "Fri, 23 Oct 2026 12:00:00 +0000");
+    assert_eq!(rfc2822(2024, 2, 29, 0), "Thu, 29 Feb 2024 12:00:00 +0000");
+    assert_eq!(rfc2822(1970, 1, 1, 0), "Thu, 01 Jan 1970 12:00:00 +0000");
+}
+
+#[test]
+fn releases_on_the_same_day_get_later_times() {
+    let generated = debian_changelog(
+        "## Unreleased\n\n## 0.3.1 - 2026-10-24\n\n## 0.3.0 - 2026-10-24\n\n## 0.2.0 - 2026-10-23\n",
     );
-    assert_eq!(rfc2822_noon(2024, 2, 29), "Thu, 29 Feb 2024 12:00:00 +0000");
-    assert_eq!(rfc2822_noon(1970, 1, 1), "Thu, 01 Jan 1970 12:00:00 +0000");
+    let times: Vec<&str> = generated
+        .lines()
+        .filter_map(|line| line.split_once(">  ").map(|(_, time)| time))
+        .collect();
+    assert_eq!(
+        times,
+        [
+            "Sat, 24 Oct 2026 12:01:00 +0000",
+            "Sat, 24 Oct 2026 12:00:00 +0000",
+            "Fri, 23 Oct 2026 12:00:00 +0000",
+        ]
+    );
 }
 
 /// The packaged Debian changelog is generated from CHANGELOG.md. Run with
