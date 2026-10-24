@@ -14,6 +14,7 @@ use fuser::{
 
 use crate::keys;
 use crate::procs::{self, Pidfd};
+use crate::secret::MAX_SECRET;
 use crate::sessions::Sessions;
 use crate::tree::{self, Kind, Node, Tree, TreeError};
 use crate::users::{self, Account};
@@ -51,7 +52,22 @@ fn split_ino(ino: u64) -> (u16, u8, u16, u64) {
 }
 
 const MAX_SLOT: usize = 0xfff;
+
+/// What one user's unlocked vaults may hold together, so that no user can make the daemon
+/// run out of memory for the others.
+pub const MAX_HELD_PER_USER: usize = 4 * MAX_SECRET;
 const MAX_GENERATION: u16 = 0xfff;
+
+pub fn check_room(name: &str, tree: &Tree, room: usize) -> Result<()> {
+    if tree.archive_size() > room {
+        bail!(
+            "`{name}` does not fit beside your other unlocked vaults, which may hold {} MiB \
+             together; lock one of them first",
+            MAX_HELD_PER_USER / (1024 * 1024)
+        );
+    }
+    Ok(())
+}
 
 pub fn check_vault_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
@@ -108,14 +124,17 @@ impl VaultState {
         self.path.exists()
     }
 
-    /// Replaces what is held in memory; inodes of the previous tree stop resolving.
-    pub fn hold(&mut self, unlocked: Unlocked) {
+    /// Replaces what is held in memory, if it fits in `room` (from `UserState::room_for`);
+    /// inodes of the previous tree stop resolving.
+    pub fn hold(&mut self, unlocked: Unlocked, room: usize) -> Result<()> {
+        check_room(&self.name, &unlocked.tree, room)?;
         self.open = Some(unlocked);
         self.generation = if self.generation >= MAX_GENERATION {
             1
         } else {
             self.generation + 1
         };
+        Ok(())
     }
 
     fn mark_changed(&mut self) {
@@ -218,6 +237,22 @@ impl UserState {
         for name in names {
             let _ = self.vault_or_new(&name);
         }
+    }
+
+    /// What the vault `name` may hold beside the user's other unlocked vaults.
+    pub fn room_for(&self, name: &str) -> usize {
+        self.room_beside(self.vault(name).map(|v| v.index))
+    }
+
+    fn room_beside(&self, index: Option<u8>) -> usize {
+        let others: usize = self
+            .vaults
+            .iter()
+            .filter(|v| Some(v.index) != index)
+            .filter_map(|v| v.open.as_ref())
+            .map(|open| open.tree.archive_size())
+            .sum();
+        MAX_HELD_PER_USER.saturating_sub(others).min(MAX_SECRET)
     }
 
     pub fn vault(&self, name: &str) -> Option<&VaultState> {
@@ -437,9 +472,13 @@ impl VaultFs {
         f: impl FnOnce(&mut Tree, u64) -> Result<T, TreeError>,
     ) -> Result<(T, u64), Errno> {
         let mut state = lock(&self.state);
-        let slot = split_ino(ino).0;
+        let (slot, index, ..) = split_ino(ino);
+        let room = state
+            .user(req.uid())
+            .map_or(0, |user| user.room_beside(Some(index)));
         let (vault, local) = self.writable(&mut state, req, ino)?;
         let tree = &mut vault.open.as_mut().ok_or(Errno::ENOENT)?.tree;
+        tree.set_space(room);
         let out = f(tree, local).map_err(errno)?;
         vault.mark_changed();
         if save_now && !vault.save_logged() {
@@ -1066,6 +1105,47 @@ mod tests {
             user.existing_vault_mut("on-disk").is_ok(),
             "a vault on disk is found"
         );
+    }
+
+    /// One user's unlocked vaults share MAX_HELD_PER_USER, so no user can take the
+    /// daemon's memory from the others, however small the vaults are when stored.
+    #[test]
+    fn a_users_unlocked_vaults_share_one_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut user = user_in(dir.path());
+        let big = || {
+            let mut tree = Tree::empty();
+            let ino = tree
+                .create_file(tree::ROOT, OsStr::new("f"), 0o600)
+                .unwrap();
+            tree.write(ino, 0, &vec![0; MAX_SECRET - 4096]).unwrap();
+            Unlocked::new(tree, crate::vault::Key::generate().unwrap(), Vec::new())
+        };
+        let fit = MAX_HELD_PER_USER / MAX_SECRET;
+        for i in 0..fit {
+            let name = format!("v{i}");
+            let room = user.room_for(&name);
+            user.vault_or_new(&name).unwrap().hold(big(), room).unwrap();
+        }
+        let room = user.room_for("over");
+        let err = user
+            .vault_or_new("over")
+            .unwrap()
+            .hold(big(), room)
+            .unwrap_err();
+        assert!(err.to_string().contains("lock one of them first"), "{err}");
+
+        let room = user.room_for("v0");
+        assert!(
+            room >= MAX_SECRET - 4096,
+            "a held vault is not counted against itself"
+        );
+        user.vault_or_new("v1").unwrap().open = None;
+        let room = user.room_for("over");
+        user.vault_or_new("over")
+            .unwrap()
+            .hold(big(), room)
+            .unwrap();
     }
 
     #[test]

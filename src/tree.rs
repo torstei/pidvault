@@ -14,6 +14,8 @@ pub const ROOT: u64 = 1;
 /// entries leave a hole so an inode is never reused for a different file.
 pub struct Tree {
     nodes: Vec<Option<Node>>,
+    /// The largest archive_size changes may grow the tree to.
+    space: usize,
 }
 
 pub struct Node {
@@ -56,7 +58,13 @@ impl Tree {
                     entries: BTreeMap::new(),
                 },
             })],
+            space: MAX_SECRET,
         }
+    }
+
+    /// Lowers what changes may grow the tree to, below MAX_SECRET.
+    pub fn set_space(&mut self, space: usize) {
+        self.space = space.min(MAX_SECRET);
     }
 
     pub fn node(&self, ino: u64) -> Option<&Node> {
@@ -94,7 +102,7 @@ impl Tree {
     }
 
     /// What `to_tar` would produce, so the vault never outgrows what can be saved.
-    fn archive_size(&self) -> usize {
+    pub fn archive_size(&self) -> usize {
         self.live()
             .map(|(_, n)| match &n.kind {
                 Kind::File { data, .. } => TAR_BLOCK + data.len().div_ceil(TAR_BLOCK) * TAR_BLOCK,
@@ -105,7 +113,7 @@ impl Tree {
     }
 
     fn check_space(&self, extra: usize) -> TreeResult<()> {
-        if self.archive_size() + extra > MAX_SECRET {
+        if self.archive_size() + extra > self.space {
             return Err(TreeError::NoSpace);
         }
         Ok(())
@@ -400,7 +408,7 @@ impl Tree {
         Ok(tree)
     }
 
-    /// The tree as a tar archive, built in locked memory.
+    /// The tree as a tar archive, in a buffer that is wiped.
     pub fn to_tar(&self) -> Result<SecretBuf> {
         let mut builder = tar::Builder::new(SecretBuf::with_capacity(self.archive_size())?);
         let mut pending = vec![(ROOT, PathBuf::new())];

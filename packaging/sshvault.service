@@ -16,10 +16,8 @@ Restart=on-failure
 StateDirectory=sshvault
 StateDirectoryMode=0700
 UMask=0077
-# decrypted vaults are held in locked memory, up to 4 MiB per user
-LimitMEMLOCK=64M
 LimitCORE=0
-# keys being parsed or used, and the FUSE buffers file writes pass through, are not
+# decrypted vaults, keys being used and file writes in transit never reach swap
 MemorySwapMax=0
 
 CapabilityBoundingSet=

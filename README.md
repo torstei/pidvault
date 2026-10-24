@@ -245,19 +245,21 @@ already unlocked see the new contents at once.
   is named differently. Shells are held by pidfd, so a reused pid inherits nothing.
 - Kernel caching is off (zero TTLs, direct I/O), so nothing seen by one process is
   served to another from cache.
-- Decrypted data and K exist only in the daemon's memory, in buffers locked against swap
-  and excluded from core dumps (an unlock fails rather than hold them otherwise), and are
-  wiped when that user's last unlocked shell exits — after any unsaved change is saved.
-  The rest of the daemon's memory, where a key is parsed for each signature and file
-  writes pass through, is kept out of swap too (`MemorySwapMax=0`), and the daemon cannot
-  be core-dumped or traced. Hibernation writes all memory to disk, this included.
+- Decrypted data and K exist only in the daemon's memory, in buffers that are wiped when
+  that user's last unlocked shell exits — after any unsaved change is saved — and before
+  any of them is moved to make room. None of the daemon's memory, including where a key
+  is parsed for each signature and where file writes pass through, is ever swapped out
+  (`MemorySwapMax=0`), and the daemon cannot be core-dumped or traced. Hibernation writes
+  all memory to disk, this included.
   Unlocking another shell while one is open only checks the passphrase and keeps what is
   in memory.
 - The daemon is reachable by everyone, so it limits what anyone can make it do: passphrase
   checks run one at a time per user, and after each wrong passphrase the next waits twice
   as long, up to half a minute, so a process cannot guess at the daemon's expense;
   scrypt runs one at a time across the daemon, at most at cost 2^20, whatever a supplied
-  file asks for; and connections are capped per user and in total.
+  file asks for; connections are capped per user and in total; and a user's unlocked
+  vaults may hold 16 MiB together (4 MiB each), counted as they would be saved, so even a
+  vault of thousands of empty files cannot take memory from other users.
 - `unlock` registers the shell that ran it, and only if that shell is in the same session:
   a client orphaned with `(sshvault unlock &)` is adopted by `systemd --user`, which must
   not end up unlocking the whole login.
