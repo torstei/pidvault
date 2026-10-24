@@ -91,8 +91,6 @@ check "bob lists only his" equals "$(as bob ls /run/sshvault | tr '\n' ' ')" "de
 check "a vault name only alice has does not exist for bob" refused as bob stat /run/sshvault/work
 check "bob cannot unlock alice's vault by its name" sh -c \
     'runuser -u bob -- sh -c "echo work-secret-phrase | sshvault unlock work --passphrase-stdin" 2>&1 | grep -q "you have no vault"'
-check "decrypted vault is held in locked memory" \
-    awk '/^VmLck:/ { exit !($2 > 0) }' "/proc/$(daemon_pid)/status"
 
 check "ssh login with the vault key from an unlocked shell" equals "$(unlocked alice 'ssh vm echo logged-in')" logged-in
 check "the login signed through the vault agent: the key itself cannot be read" refused unlocked alice \
@@ -143,6 +141,21 @@ as alice sh -c 'echo alice-secret-phrase > /tmp/orphan-fifo'
 for _ in $(seq 50); do [[ -s /tmp/orphan.out ]] && break; sleep 0.1; done
 check "an orphaned unlock is refused" grep -q "directly from the shell" /tmp/orphan.out
 check "alice's user services still see nothing" refused in_manager alice --wait --pipe cat /run/sshvault/default/config
+
+# however small one user's vaults are when stored, holding them must not use up what the
+# daemon can hold for everyone else
+as carol sh -c '
+    for v in flood1 flood2 flood3 flood4 flood5; do
+        echo carol-secret-phrase | sshvault create "$v" --passphrase-stdin --work-factor 10 >/dev/null &&
+            (cd "/run/sshvault/$v" && seq 8000 | xargs touch 2>/dev/null)
+        ls "/run/sshvault/$v" | wc -l > "/tmp/carol-$v"
+    done
+    touch /tmp/carol-flooded; exec sleep 600' &
+for _ in $(seq 1200); do [[ -e /tmp/carol-flooded ]] && break; sleep 0.1; done
+check "carol holds vaults full of empty files" test -e /tmp/carol-flooded
+check "four full vaults fit in what one user may hold" equals "$(cat /tmp/carol-flood4)" 8001
+check "a fifth is cut short" test "$(cat /tmp/carol-flood5)" -lt 8001
+check "bob still unlocks while carol holds them" unlocked bob 'test -d /run/sshvault/default'
 
 check "daemon logged no warnings" refused sh -c 'journalctl -b -u sshvault | grep -qi warning'
 

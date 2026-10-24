@@ -297,13 +297,14 @@ fn with_vault<T>(
     ctx: &Daemon,
     peer: &procs::PeerCred,
     name: &str,
-    f: impl FnOnce(&mut VaultState) -> Result<T>,
+    f: impl FnOnce(&mut VaultState, usize) -> Result<T>,
 ) -> Result<T> {
     let mut state = fs::lock(&ctx.state);
     let user = state
         .user_mut(peer.uid)
         .context("caller has no passwd entry")?;
-    f(user.existing_vault_mut(name)?)
+    let room = user.room_for(name);
+    f(user.existing_vault_mut(name)?, room)
 }
 
 /// As `with_vault`, but also for a vault that is about to be created.
@@ -311,13 +312,14 @@ fn with_new_vault<T>(
     ctx: &Daemon,
     peer: &procs::PeerCred,
     name: &str,
-    f: impl FnOnce(&mut VaultState) -> Result<T>,
+    f: impl FnOnce(&mut VaultState, usize) -> Result<T>,
 ) -> Result<T> {
     let mut state = fs::lock(&ctx.state);
     let user = state
         .user_mut(peer.uid)
         .context("caller has no passwd entry")?;
-    f(user.vault_or_new(name)?)
+    let room = user.room_for(name);
+    f(user.vault_or_new(name)?, room)
 }
 
 fn needs_unlock(name: &str) -> String {
@@ -362,14 +364,18 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 })?,
                 contents: key.seal_tree(&tree)?,
             };
-            with_new_vault(ctx, &peer, &name, |vault| {
+            with_new_vault(ctx, &peer, &name, |vault, room| {
                 let replacing = vault.exists();
                 if replacing && vault.unlocked_ancestor(peer.pid).is_none() {
                     bail!("replacing `{name}` {}", needs_unlock(&name));
                 }
+                let held = vault.open.is_some() || shell.is_some();
+                if held {
+                    fs::check_room(&name, &tree, room)?;
+                }
                 stored.write(&vault.path, true)?;
-                if vault.open.is_some() || shell.is_some() {
-                    vault.hold(Unlocked::new(tree, key, stored.wrapped_key));
+                if held {
+                    vault.hold(Unlocked::new(tree, key, stored.wrapped_key), room)?;
                 }
                 let mut message = if replacing {
                     format!("vault `{name}` replaced; the previous one is kept as a backup")
@@ -387,7 +393,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             vault: name,
             passphrase,
         } => {
-            let wrapped_key = with_vault(ctx, &peer, &name, |vault| {
+            let wrapped_key = with_vault(ctx, &peer, &name, |vault, _| {
                 match (&vault.open, vault.unlocked_ancestor(peer.pid)) {
                     (Some(open), Some(_)) => Ok(open.wrapped_key.clone()),
                     _ => bail!("export {}", needs_unlock(&name)),
@@ -396,7 +402,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             let key = ctx.guesses.check(peer.uid, || {
                 limits::expensive(|| Key::unwrap(&wrapped_key, secret(&passphrase)))
             })?;
-            let archive = with_vault(ctx, &peer, &name, |vault| match &vault.open {
+            let archive = with_vault(ctx, &peer, &name, |vault, _| match &vault.open {
                 Some(open) if open.key.same_as(&key) => open.tree.to_tar(),
                 _ => bail!("`{name}` changed during export; try again"),
             })?;
@@ -412,7 +418,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             new,
         } => {
             vault::check_new_passphrase(&new)?;
-            let wrapped_key = with_vault(ctx, &peer, &name, |vault| match &vault.open {
+            let wrapped_key = with_vault(ctx, &peer, &name, |vault, _| match &vault.open {
                 Some(open) => Ok(open.wrapped_key.clone()),
                 None => Ok(Stored::read(&vault.path)
                     .with_context(|| format!("you have no vault `{name}`"))?
@@ -422,7 +428,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 limits::expensive(|| Key::unwrap(&wrapped_key, secret(&old)))
             })?;
             let rewrapped = limits::expensive(|| key.wrap(secret(&new), ctx.wrap_work_factor))?;
-            with_vault(ctx, &peer, &name, |vault| {
+            with_vault(ctx, &peer, &name, |vault, _| {
                 match &vault.open {
                     Some(open) if open.key.same_as(&key) => vault.rewrap(rewrapped)?,
                     Some(_) => bail!("`{name}` changed meanwhile; try again"),
@@ -449,7 +455,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             let expires = for_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
             fs::check_vault_name(&name)?;
             let (shell, handle) = calling_shell(&peer)?;
-            let path = with_vault(ctx, &peer, &name, |vault| Ok(vault.path.clone()))?;
+            let path = with_vault(ctx, &peer, &name, |vault, _| Ok(vault.path.clone()))?;
             if !path.exists() {
                 bail!("you have no vault `{name}`; create one with `sshvault create {name}`");
             }
@@ -457,7 +463,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             let key = ctx.guesses.check(peer.uid, || {
                 limits::expensive(|| Key::unwrap(&stored.wrapped_key, secret(&passphrase)))
             })?;
-            with_vault(ctx, &peer, &name, |vault| {
+            with_vault(ctx, &peer, &name, |vault, room| {
                 // a vault already held keeps its unsaved changes; this unlock only proves the passphrase
                 match &vault.open {
                     Some(open) if open.key.same_as(&key) => {}
@@ -469,7 +475,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                             bail!("`{name}` changed while unlocking; try again");
                         }
                         let tree = key.open_tree(&current.contents)?;
-                        vault.hold(Unlocked::new(tree, key, current.wrapped_key));
+                        vault.hold(Unlocked::new(tree, key, current.wrapped_key), room)?;
                     }
                 }
                 vault.sessions.register(shell, handle, expires);
