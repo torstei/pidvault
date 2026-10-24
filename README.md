@@ -271,10 +271,14 @@ local port with a key that exists only in the vault.
 
 `tests/vm/run.sh` needs access to `/dev/kvm`, `qemu-system-x86_64`, `genisoimage`, `gpgv`
 and `cargo-deb`. It downloads the Ubuntu cloud image once into `~/.cache/sshvault-vm`,
-checked against Ubuntu's signed `SHA256SUMS`, and boots each run from a fresh overlay.
-Inside, `tests/vm/guest-tests.sh` installs the package and tests it as root, with two users
-whose processes run under real `systemd --user` managers, then upgrades, removes and purges
-it. Results come back as TAP on the VM's second serial port.
+checked against Ubuntu's signed `SHA256SUMS`, and boots two VMs in parallel, each from a
+fresh overlay. In one, `tests/vm/guest-tests.sh` installs the package and tests it as root,
+with two users whose processes run under real `systemd --user` managers, then reinstalls,
+removes and purges it. In the other, `tests/vm/guest-upgrade.sh` installs the latest release
+from the published apt repository, puts a vault to use, upgrades to the package under test
+and checks that the vault, its keys and the agent still work. It skips the upgrade when
+nothing older than the package under test is published. Results come back as TAP on each
+VM's second serial port.
 
 `packaging/` has the systemd units — the daemon and its sockets, and the mount helper and
 its socket — and the `sysusers.d` entry for the `sshvault` account.
