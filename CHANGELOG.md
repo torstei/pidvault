@@ -31,6 +31,11 @@
   held in ordinary memory, which the whole daemon keeps out of swap, and a user's
   unlocked vaults may hold 16 MiB together.
 - Fuzz targets for everything other processes can hand the daemon, run in CI.
+- `unlock`, and `create` and `import` when they unlock, refuse where
+  `kernel.yama.ptrace_scope` is 0 or Yama is missing: any process could then trace an
+  unlocked shell and act as it.
+- A security design document (`docs/security-design.md`) with the threat model, the
+  claims sshvault makes and the tests behind them, and its known limitations.
 - Every `unsafe` block states why it is sound, checked by clippy. The daemon checks the
   file descriptors it is handed by systemd and the mount helper instead of trusting them.
 

@@ -157,6 +157,11 @@ check "four full vaults fit in what one user may hold" equals "$(cat /tmp/carol-
 check "a fifth is cut short" test "$(cat /tmp/carol-flood5)" -lt 8001
 check "bob still unlocks while carol holds them" unlocked bob 'test -d /run/sshvault/default'
 
+sysctl -q -w kernel.yama.ptrace_scope=0
+check "unlocking is refused where any process could trace the shell" sh -c \
+    'runuser -u bob -- sh -c "echo bob-secret-phrase | sshvault unlock --passphrase-stdin" 2>&1 | grep -q ptrace_scope'
+sysctl -q -w kernel.yama.ptrace_scope=1
+
 check "daemon logged no warnings" refused sh -c 'journalctl -b -u sshvault | grep -qi warning'
 
 # --- lifecycle --------------------------------------------------------------

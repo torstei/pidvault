@@ -118,6 +118,28 @@ pub fn peer_cred(stream: &UnixStream) -> io::Result<PeerCred> {
     })
 }
 
+const PTRACE_SCOPE: &str = "/proc/sys/kernel/yama/ptrace_scope";
+
+/// Refuses to unlock where any of the user's processes could trace an unlocked shell and
+/// act as it: without Yama, or with its ptrace_scope at 0.
+pub fn check_tracing_restricted() -> anyhow::Result<()> {
+    let scope = std::fs::read_to_string(PTRACE_SCOPE).ok();
+    if !tracing_restricted(scope.as_deref()) {
+        anyhow::bail!(
+            "any of your processes could take over an unlocked shell here, since \
+             kernel.yama.ptrace_scope is 0 or Yama is missing; set it to 1 \
+             (`sudo sysctl kernel.yama.ptrace_scope=1`, and in /etc/sysctl.d to keep it)"
+        );
+    }
+    Ok(())
+}
+
+fn tracing_restricted(scope: Option<&str>) -> bool {
+    scope
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .is_some_and(|scope| scope >= 1)
+}
+
 /// Keeps other processes out of this one's memory; refuses to continue if already traced.
 pub fn harden() -> io::Result<()> {
     // also suppresses core dumps, which would hold decrypted vaults
@@ -144,6 +166,16 @@ fn tracer_pid() -> io::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_restricted_ptrace_scope_allows_unlocking() {
+        for scope in ["1\n", "2\n", "3\n"] {
+            assert!(tracing_restricted(Some(scope)), "{scope}");
+        }
+        for scope in [Some("0\n"), Some(""), Some("x"), None] {
+            assert!(!tracing_restricted(scope), "{scope:?}");
+        }
+    }
 
     #[test]
     fn ppid_survives_hostile_comm() {

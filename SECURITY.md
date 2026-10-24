@@ -26,4 +26,5 @@ reached through ssh, or anyone reading the stored vault files. So is anything th
 such a process deny service to other users.
 
 The README's "What it does not do" section lists what is out of scope by design, such as
-root and what runs inside an unlocked shell.
+root and what runs inside an unlocked shell. [docs/security-design.md](docs/security-design.md)
+has the threat model, the claims sshvault makes, and its known limitations.

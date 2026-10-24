@@ -54,7 +54,14 @@ to get right:
 - **The sshvault block in `~/.ssh/config`.** It is editable the same way, and an entry
   placed above it wins. `sudo chattr +i ~/.ssh ~/.ssh/config` stops that; `authorized_keys`
   and `known_hosts` stay editable in place.
+- **Watching or taking over an unlocked shell.** A process that can trace the shell
+  can act as it, so `unlock` refuses unless `kernel.yama.ptrace_scope` is at least 1
+  (Ubuntu's default); even then the shell's ancestors, such as the terminal emulator, can.
+  On X11, any program on your display can read the passphrase as you type it.
 - **Root.** Anything that is, or can become, root is out of scope.
+
+The full list, with what each guarantee rests on, is in
+[docs/security-design.md](docs/security-design.md).
 
 ## Installing
 
