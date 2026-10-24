@@ -9,6 +9,18 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
+    # these share types with ssh-key and rsa, so they move to new majors together, by hand
+    ignore:
+      - dependency-name: ssh-key
+        versions: [">= 0.7"]
+      - dependency-name: rsa
+        versions: [">= 0.10"]
+      - dependency-name: sha2
+        versions: [">= 0.11"]
+      - dependency-name: signature
+        versions: [">= 3.0"]
+      - dependency-name: ssh-encoding
+        versions: [">= 0.3"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
