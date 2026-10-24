@@ -13,7 +13,8 @@ jobs:
 
   build:
     needs: ci
-    runs-on: ubuntu-latest
+    # the oldest Ubuntu the package supports, so it links against a glibc they all have
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -79,7 +80,7 @@ jobs:
   # for approval.
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: release
     permissions:
@@ -107,6 +108,8 @@ jobs:
           gh release list --limit 1000 --json tagName --jq '.[].tagName' | while read -r tag; do
             gh release download "$tag" --pattern '*.deb' --dir debs --clobber
           done
+      - name: Install apt-ftparchive
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends apt-utils
       - name: Build and sign the repository
         env:
           APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
