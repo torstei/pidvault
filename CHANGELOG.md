@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-24
 
 - The daemon no longer starts as root. It runs as `sshvault` from the start, with no
   capabilities and systemd's sandbox (read-only system, no `/home`, devices or network,
@@ -24,8 +24,8 @@
 - New passphrases (`create`, `passwd`) need at least 15 characters. Existing vaults and
   imported files keep the passphrase they have.
 - None of the daemon's memory is swapped out any more, not only the buffers holding
-  decrypted vaults. `create --from` and `add-key` hold what they read in wiped, locked
-  memory as well.
+  decrypted vaults. `create --from` and `add-key` wipe what they read once they are done
+  with it.
 - One user could stop all others from unlocking by holding vaults full of empty files:
   each file took a page of locked memory, which all users share. Vault contents are now
   held in ordinary memory, which the whole daemon keeps out of swap, and a user's

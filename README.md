@@ -309,7 +309,7 @@ for half an hour weekly, keeping the corpus between runs.
 its socket — and the `sysusers.d` entry for the `sshvault` account.
 
 `cargo deny check` (configured in `deny.toml`, whose accepted advisories
-`osv-scanner.toml` repeats for Scorecard) checks dependencies against the RustSec
+`osv-scanner.toml` repeats for Scorecard, with a copy in `fuzz/`) checks dependencies against the RustSec
 advisories, the allowed licenses and crates.io as the only source; CI runs it, and lintian on
 the package. `packaging/sshvault.1` and `packaging/changelog.Debian` are generated: tests
 fail when they are stale and say how to regenerate them.

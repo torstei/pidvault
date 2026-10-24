@@ -86,7 +86,8 @@ fn the_debian_changelog_is_up_to_date() {
 }
 
 /// deny.toml serves cargo deny, osv-scanner.toml serves Scorecard and OSV; an advisory
-/// accepted in one and not the other would fail one of them.
+/// accepted in one and not the other would fail one of them. OSV reads a config only
+/// beside the lockfile it applies to, so fuzz/ carries a copy for fuzz/Cargo.lock.
 #[test]
 fn both_scanners_accept_the_same_advisories() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -110,4 +111,5 @@ fn both_scanners_accept_the_same_advisories() {
         ids(&read("deny.toml")["advisories"]["ignore"]),
         ids(&read("osv-scanner.toml")["IgnoredVulns"])
     );
+    assert_eq!(read("osv-scanner.toml"), read("fuzz/osv-scanner.toml"));
 }
