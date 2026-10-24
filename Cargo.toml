@@ -30,6 +30,7 @@ toml = "1.1.8"
 zeroize = { version = "1.9.1", features = ["serde"] }
 
 [dev-dependencies]
+clap_mangen = "0.3.3"
 tempfile = "3.27.0"
 
 [package.metadata.deb]
@@ -38,9 +39,16 @@ A shell that has run `sshvault unlock`, and every process it starts, sees the \
 decrypted SSH config under /run/sshvault/<vault> and can use its keys through \
 the vault agent, which never hands them out. Every other process of the same \
 user sees nothing."""
+changelog = "packaging/changelog.Debian"
 section = "net"
+copyright = "2026 Torstein Tauno Svendsen <torstei@gmail.com>"
 depends = "$auto"
-assets = [["target/release/sshvault", "usr/bin/", "755"], ["README.md", "usr/share/doc/sshvault/README.md", "644"]]
+assets = [
+    ["target/release/sshvault", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/sshvault/README.md", "644"],
+    ["CHANGELOG.md", "usr/share/doc/sshvault/changelog", "644"],
+    ["packaging/sshvault.1", "usr/share/man/man1/sshvault.1", "644"],
+]
 maintainer-scripts = "packaging"
 systemd-units = [
     { unit-scripts = "packaging", enable = true, start = true },

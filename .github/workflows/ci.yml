@@ -55,10 +55,15 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-deny
             target
           key: test-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      - name: Check dependencies for advisories, licenses and sources
+        run: |
+          command -v cargo-deny || cargo install cargo-deny --locked
+          cargo deny check
       - run: cargo test
 
   vm:
@@ -88,7 +93,7 @@ jobs:
           mkdir -p ~/apt-archives/partial
           sudo apt-get $APT_OPTIONS update
           sudo apt-get $APT_OPTIONS -o Dir::Cache::archives="$HOME/apt-archives" \
-            install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage gpgv ubuntu-cloudimage-keyring apt-utils
+            install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage gpgv ubuntu-cloudimage-keyring apt-utils lintian
           sudo chown -R "$USER" ~/apt-archives
       - name: Keep downloaded packages
         if: steps.apt-cache.outputs.cache-hit != 'true'
@@ -116,7 +121,10 @@ jobs:
         env:
           SSHVAULT_VM_KEEP: "1"
           TMPDIR: ${{ runner.temp }}
-        run: tests/vm/run.sh
+        run: rm -rf target/debian && tests/vm/run.sh
+      # the tag is about uploads to Debian itself, which this package never makes
+      - name: Check the package with lintian
+        run: lintian --fail-on error,warning --suppress-tags initial-upload-closes-no-bugs target/debian/sshvault_*.deb
       - name: Keep the VM logs
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

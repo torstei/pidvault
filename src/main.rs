@@ -643,4 +643,24 @@ mod tests {
         assert_eq!(daemon::format_duration(5400), "1h 30m");
         assert_eq!(daemon::format_duration(7200), "2h");
     }
+
+    /// The packaged man page is generated from the command line definitions. Run with
+    /// SSHVAULT_WRITE_MAN=1 to regenerate it after changing them.
+    #[test]
+    fn the_man_page_is_up_to_date() {
+        use clap::CommandFactory;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/sshvault.1");
+        let mut page = Vec::new();
+        clap_mangen::Man::new(Cli::command())
+            .render(&mut page)
+            .unwrap();
+        if std::env::var_os("SSHVAULT_WRITE_MAN").is_some() {
+            std::fs::write(&path, &page).unwrap();
+        }
+        let packaged = std::fs::read(&path).unwrap_or_default();
+        assert!(
+            packaged == page,
+            "packaging/sshvault.1 is stale; run SSHVAULT_WRITE_MAN=1 cargo test the_man_page"
+        );
+    }
 }
