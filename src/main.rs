@@ -594,9 +594,9 @@ __sshvault_prompt() {
     [[ -n ${__sshvault_tail-} ]] && PS1=${PS1//"$__sshvault_tail"/}
     __sshvault_head='' __sshvault_tail=''
     if vaults=$(SSHVAULT_EXE status --prompt 2>/dev/null); then
-        __sshvault_head="\[\e[1;97;41m\] 🔓 $vaults \[\e[0m\] "
+        __sshvault_head="\[\e[1;97;41m\] 🔑 $vaults \[\e[0m\] "
         # last in PS1, after anything else there that sets the title
-        __sshvault_tail="\[\e]2;🔓 $vaults — \u@\h: \w\a\]"
+        __sshvault_tail="\[\e]2;🔑 $vaults — \u@\h: \w\a\]"
         PS1=$__sshvault_head$PS1$__sshvault_tail
         __sshvault_titled=1
     elif [[ -n ${__sshvault_titled-} ]]; then
