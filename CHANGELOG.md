@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `eval "$(sshvault shell-init)"` in `~/.bashrc` marks shells that have a vault
+  unlocked: a red marker before the prompt and the vault names in the terminal title,
+  with the time left after `unlock --for`. `sshvault status --prompt` prints just that.
+
 ## 0.3.1 - 2026-10-24
 
 - The first release of the 0.3 changes in the apt repository: publishing 0.3.0 stopped

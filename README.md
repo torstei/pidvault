@@ -142,6 +142,18 @@ left. Once no shell has a vault unlocked, its decrypted contents and key leave m
 Other commands: `sshvault status`, `sshvault lock` (this shell) and `sshvault lock --all`
 (every shell), and `sshvault passwd` to change a passphrase.
 
+To see which shells have a vault unlocked, put this at the end of `~/.bashrc`:
+
+```sh
+eval "$(sshvault shell-init)"
+```
+
+While a shell has a vault unlocked, its prompt starts with a red marker naming the vault
+and the time left, e.g. ` 🔓 default 9m `, and the terminal title starts with the same.
+Both go away at the next prompt once the vault is locked or runs out. The marker is a
+reminder, not a safeguard: any process of yours can print one. It is for bash; the rest
+of your prompt stays as it was.
+
 ### Keys and the agent
 
 A file in a vault is a key when it is an unencrypted private key in OpenSSH format, as

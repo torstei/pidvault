@@ -1323,6 +1323,62 @@ fn an_unlock_for_a_while_ends_by_itself() {
     );
 }
 
+/// The prompt hook from `shell-init` marks a shell only while it has a vault unlocked,
+/// says for how long, gives back PS1 and the title once the vault locks, and keeps the
+/// exit status of the last command for whatever else in PROMPT_COMMAND reports it.
+#[test]
+fn the_prompt_marks_a_shell_while_it_has_a_vault_unlocked() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let o = f
+        .command("bash")
+        .env("PW", PASSPHRASE)
+        .args([
+            "-c",
+            r#"eval "$("$SV" shell-init)"
+           PS1='$ '
+           __sshvault_prompt; printf '%s\n' "$PS1"
+           printf '%s\n' "$PW" | "$SV" unlock --for 10m --passphrase-stdin >/dev/null
+           (exit 3); __sshvault_prompt; echo "status $?"
+           __sshvault_prompt; printf '%s\n' "$PS1"
+           "$SV" lock >/dev/null
+           __sshvault_prompt; printf '%s\n' "$PS1"
+           echo "${PROMPT_COMMAND[@]}""#,
+        ])
+        .output()
+        .unwrap();
+    let marked =
+        r"\[\e[1;97;41m\] 🔓 default 10m \[\e[0m\] $ \[\e]2;🔓 default 10m — \u@\h: \w\a\]";
+    let out = stdout(&o);
+    assert!(
+        out.starts_with(&format!("$ \nstatus 3\n{marked}\n\x1b]2;")),
+        "{o:?}"
+    );
+    assert!(out.ends_with("\x07$ \n__sshvault_prompt\n"), "{o:?}");
+}
+
+#[test]
+fn status_for_a_prompt_names_only_the_vaults_this_shell_unlocked() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    create_named(&f, "work", "Host w\n");
+    let both = shell_with(&f, &["default", "work"], "\"$SV\" status --prompt");
+    assert_eq!(stdout(&both), "default, work\n", "{both:?}");
+    let one = shell_with(&f, &["work"], "\"$SV\" status --prompt");
+    assert_eq!(stdout(&one), "work\n", "{one:?}");
+    let none = f
+        .command(BIN)
+        .args(["status", "--prompt"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        (none.status.code(), stdout(&none)),
+        (Some(1), String::new())
+    );
+}
+
 #[test]
 fn a_wrong_passphrase_makes_the_next_try_wait() {
     let Some(f) = Fixture::start(&[("config", CONFIG)]) else {

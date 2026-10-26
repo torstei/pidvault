@@ -107,6 +107,10 @@ enum Command {
         /// Print nothing, not even errors
         #[arg(long, short)]
         quiet: bool,
+        /// Print only the vaults the calling shell has unlocked and the time each has
+        /// left, for a shell prompt; nothing when there are none
+        #[arg(long, conflicts_with = "quiet")]
+        prompt: bool,
     },
     /// Change the passphrase of a vault
     Passwd {
@@ -154,6 +158,9 @@ enum Command {
     },
     /// Print the lines to put at the top of ~/.ssh/config
     Stub,
+    /// Print bash code that marks shells with a vault unlocked, in the prompt and the
+    /// terminal title; use it with `eval "$(sshvault shell-init)"` in ~/.bashrc
+    ShellInit,
 }
 
 fn main() -> ExitCode {
@@ -290,13 +297,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Lock { vault, all } => {
             report(protocol::call(&cli.socket, &Request::Lock { vault, all })?)
         }
-        Command::Status { vault, quiet } => {
+        Command::Status {
+            vault,
+            quiet,
+            prompt,
+        } => {
             let reply = match protocol::call(&cli.socket, &Request::Status) {
                 Ok(reply) => reply,
-                Err(_) if quiet => return Ok(ExitCode::from(2)),
+                Err(_) if quiet || prompt => return Ok(ExitCode::from(2)),
                 Err(e) => return Err(e),
             };
-            if !quiet {
+            if prompt {
+                let line = prompt_line(&reply, vault.as_deref());
+                if !line.is_empty() {
+                    println!("{line}");
+                }
+            } else if !quiet {
                 print_status(&reply);
             }
             let unlocked = match &vault {
@@ -452,6 +468,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("{}", stub(&cli.mount, &cli.agent_socket)?);
             Ok(ExitCode::SUCCESS)
         }
+        Command::ShellInit => {
+            let exe = std::env::current_exe().context("cannot tell where sshvault is installed")?;
+            print!("{}", shell_init(&exe));
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -533,6 +554,63 @@ fn print_status(reply: &Response) {
             println!("  {note}");
         }
     }
+}
+
+/// The vaults the calling shell has unlocked, each with the time it has left, e.g.
+/// `default 9m, work`.
+fn prompt_line(reply: &Response, only: Option<&str>) -> String {
+    reply
+        .vaults
+        .iter()
+        .filter(|v| v.unlocked_by.is_some() && only.is_none_or(|name| v.name == name))
+        .map(|v| match v.expires_in {
+            Some(secs) => format!("{} {}", v.name, short_duration(secs)),
+            None => v.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Time left as a prompt shows it: seconds under a minute, otherwise whole minutes
+/// rounded up, so it never shows less time than there is.
+fn short_duration(secs: u64) -> String {
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let minutes = secs.div_ceil(60);
+    match (minutes / 60, minutes % 60) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h{m}m"),
+    }
+}
+
+/// Vault names cannot contain anything bash would expand in PS1.
+const SHELL_INIT: &str = r#"# sshvault: while this shell has a vault unlocked, a red marker before the prompt
+# and the vault names in the terminal title.
+__sshvault_prompt() {
+    local status=$? vaults
+    [[ -n ${__sshvault_head-} ]] && PS1=${PS1//"$__sshvault_head"/}
+    [[ -n ${__sshvault_tail-} ]] && PS1=${PS1//"$__sshvault_tail"/}
+    __sshvault_head='' __sshvault_tail=''
+    if vaults=$(SSHVAULT_EXE status --prompt 2>/dev/null); then
+        __sshvault_head="\[\e[1;97;41m\] 🔓 $vaults \[\e[0m\] "
+        # last in PS1, after anything else there that sets the title
+        __sshvault_tail="\[\e]2;🔓 $vaults — \u@\h: \w\a\]"
+        PS1=$__sshvault_head$PS1$__sshvault_tail
+        __sshvault_titled=1
+    elif [[ -n ${__sshvault_titled-} ]]; then
+        printf '\e]2;%s@%s: %s\a' "$USER" "${HOSTNAME%%.*}" "${PWD/#"$HOME"/\~}"
+        __sshvault_titled=''
+    fi
+    return "$status"
+}
+[[ " ${PROMPT_COMMAND[*]-} " == *" __sshvault_prompt "* ]] || PROMPT_COMMAND+=(__sshvault_prompt)
+"#;
+
+fn shell_init(exe: &Path) -> String {
+    let quoted = format!("'{}'", exe.display().to_string().replace('\'', r"'\''"));
+    SHELL_INIT.replace("SSHVAULT_EXE", &quoted)
 }
 
 fn stub(mount: &Path, agent_socket: &Path) -> Result<String> {
@@ -626,6 +704,16 @@ fn passphrase_from_stdin() -> Result<Zeroizing<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prompt_rounds_the_time_left_up() {
+        assert_eq!(short_duration(59), "59s");
+        assert_eq!(short_duration(60), "1m");
+        assert_eq!(short_duration(61), "2m");
+        assert_eq!(short_duration(599), "10m");
+        assert_eq!(short_duration(3599), "1h");
+        assert_eq!(short_duration(5400), "1h30m");
+    }
 
     #[test]
     fn durations_parse_with_units() {
