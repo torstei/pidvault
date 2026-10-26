@@ -1349,7 +1349,7 @@ fn the_prompt_marks_a_shell_while_it_has_a_vault_unlocked() {
         .output()
         .unwrap();
     let marked =
-        r"\[\e[1;97;41m\] 🔓 default 10m \[\e[0m\] $ \[\e]2;🔓 default 10m — \u@\h: \w\a\]";
+        r"\[\e[1;97;41m\] 🔑 default 10m \[\e[0m\] $ \[\e]2;🔑 default 10m — \u@\h: \w\a\]";
     let out = stdout(&o);
     assert!(
         out.starts_with(&format!("$ \nstatus 3\n{marked}\n\x1b]2;")),
