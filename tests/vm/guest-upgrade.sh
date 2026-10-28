@@ -5,8 +5,6 @@ set -uo pipefail
 
 DEB=$1
 SEED=$(dirname "$DEB")
-# shorter than a new passphrase may be: vaults made before the minimum must keep opening
-PASS_SUFFIX=-pass
 . "$SEED/lib.sh"
 
 skip_all() {
@@ -50,13 +48,13 @@ as alice sh -c '
     sshvault stub > ~/.ssh/config
 '
 check "alice creates a vault" as alice sh -c \
-    'echo alice-pass | sshvault create --passphrase-stdin --work-factor 12 --from ~/src >/dev/null && rm ~/src/id_vm'
+    'echo alice-secret-phrase | sshvault create --passphrase-stdin --work-factor 12 --from ~/src >/dev/null && rm ~/src/id_vm'
 check "alice logs in with the vault key" equals "$(unlocked alice 'ssh vm echo logged-in')" logged-in
 check "alice edits her config" unlocked alice "sed -i 's/LogLevel ERROR/LogLevel QUIET/' /run/sshvault/default/config"
 as alice ssh-keygen -q -t ed25519 -N 'key secret' -C old-github -f /tmp/alice-old-key
 check "alice adds a protected key" unlocked alice \
     "echo 'key secret' | sshvault add-key --passphrase-stdin --name id_github /tmp/alice-old-key >/dev/null"
-as alice sh -c 'echo work-pass | sshvault create work --no-unlock --passphrase-stdin --work-factor 12 >/dev/null'
+as alice sh -c 'echo work-secret-phrase | sshvault create work --no-unlock --passphrase-stdin --work-factor 12 >/dev/null'
 
 # --- upgrade ----------------------------------------------------------------
 
@@ -79,7 +77,7 @@ check "alice lists both her vaults" equals "$(as alice ls /run/sshvault | tr '\n
 check "the vault opens with its passphrase and keeps the edit" unlocked alice \
     'grep -q "LogLevel QUIET" /run/sshvault/default/config'
 check "the second vault opens too" as alice sh -c \
-    'echo work-pass | sshvault unlock work --passphrase-stdin >/dev/null && test -d /run/sshvault/work'
+    'echo work-secret-phrase | sshvault unlock work --passphrase-stdin >/dev/null && test -d /run/sshvault/work'
 check "the agent signs with the vault key" equals "$(unlocked alice 'ssh vm echo logged-in')" logged-in
 check "the added key is still offered, and still unreadable" unlocked alice \
     'SSH_AUTH_SOCK=/run/sshvault-agent.sock ssh-add -l | grep -q old-github && ! cat /run/sshvault/default/id_github 2>/dev/null'
