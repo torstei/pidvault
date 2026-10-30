@@ -88,11 +88,13 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
 - Every FUSE request is checked anew: the caller's uid must own the vault, and its pid
   must be, or descend from, a registered shell that is still alive (`fs::VaultFs::target`,
   `sessions`). A file descriptor passed out of an unlocked shell is useless, since reads
-  through it are checked against the reader.
+  through it are checked against the reader, and so is reopening one through
+  `/proc/<pid>/fd`, which is a new open by the caller.
 - Kernel caching is off (zero TTLs, direct I/O), so nothing is served from cache.
 - Evidence: e2e `outsider_sees_an_empty_directory`,
   `outsider_is_refused_while_a_shell_is_unlocked`, `access_ends_when_the_shell_exits`,
-  `lock_revokes_access_for_the_shell`, `an_orphaned_unlock_does_not_unlock_its_adopter`;
+  `lock_revokes_access_for_the_shell`, `an_orphaned_unlock_does_not_unlock_its_adopter`,
+  `only_unlocked_shells_can_write`;
   VM "another process of alice sees nothing", "alice's user services see nothing".
 
 ### C2. Nobody can read a private key, not even an unlocked shell
@@ -255,6 +257,13 @@ Accepted advisories are listed, with reasons, in `deny.toml` and `osv-scanner.to
   keystrokes, so A1 can capture the passphrase and unlock by itself. Wayland does not
   allow this. A process that can write to the terminal of an unlocked shell can inject
   commands where the kernel still permits `TIOCSTI`.
+- **Pipes and terminals.** Any of the owner's processes can open another's pipes and
+  terminal through `/proc/<pid>/fd` (Yama restricts attaching, not this) and read what
+  passes through them. A passphrase piped to `--passphrase-stdin` or typed at the prompt
+  can be taken on its way, and so can a secret that a program in an unlocked shell passes
+  on through a pipe, a helper or its environment. A program that reads the secret from
+  the vault itself, as ssh does its config, is not exposed: the file cannot be reopened
+  (C1).
 - **RSA timing.** The `rsa` crate's arithmetic is not constant-time (RUSTSEC-2023-0071).
   Signatures are blinded, but a process in an unlocked shell can time many of them;
   Ed25519 is recommended.

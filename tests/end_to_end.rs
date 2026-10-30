@@ -218,9 +218,9 @@ fn outsider_is_refused_while_a_shell_is_unlocked() {
         return;
     };
     let mut shell = f
-        .command("sh")
+        .command("bash")
         .env("PW", PASSPHRASE)
-        .args(["-c", "printf '%s\\n' \"$PW\" | \"$SV\" unlock --passphrase-stdin >/dev/null && echo $$ && sleep 30"])
+        .args(["-c", "printf '%s\\n' \"$PW\" | \"$SV\" unlock --passphrase-stdin >/dev/null && exec 3<\"$MNT/config\" && echo $$ && sleep 30 3>&-; true"])
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -233,10 +233,16 @@ fn outsider_is_refused_while_a_shell_is_unlocked() {
     let direct = f.outsider("cat \"$MNT/config\"");
     let via_proc_root = f.outsider(&format!("cat /proc/{shell_pid}/root\"$MNT/config\""));
     let via_proc_cwd = f.outsider(&format!("cd /proc/{shell_pid}/cwd && cat \"$MNT/config\""));
+    let open_file = f.outsider(&format!("readlink /proc/{shell_pid}/fd/3"));
+    let via_open_file = f.outsider(&format!("cat /proc/{shell_pid}/fd/3"));
     shell.kill().unwrap();
     shell.wait().unwrap();
 
-    for attempt in [direct, via_proc_root, via_proc_cwd] {
+    assert!(
+        stdout(&open_file).contains("/mnt/default/config"),
+        "{open_file:?}"
+    );
+    for attempt in [direct, via_proc_root, via_proc_cwd, via_open_file] {
         assert!(!attempt.status.success(), "{attempt:?}");
         assert_eq!(stdout(&attempt), "");
     }
@@ -321,9 +327,9 @@ fn only_unlocked_shells_can_write() {
         return;
     };
     let mut shell = f
-        .command("sh")
+        .command("bash")
         .env("PW", PASSPHRASE)
-        .args(["-c", "printf '%s\\n' \"$PW\" | \"$SV\" unlock --passphrase-stdin >/dev/null && echo $$ && sleep 30"])
+        .args(["-c", "printf '%s\\n' \"$PW\" | \"$SV\" unlock --passphrase-stdin >/dev/null && exec 3>>\"$MNT/config\" && echo $$ && sleep 30 3>&-; true"])
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -338,6 +344,7 @@ fn only_unlocked_shells_can_write() {
         "rm \"$MNT/config\"",
         "mkdir \"$MNT/dir\"",
         "echo planted > \"$SSHVAULT_MOUNT/new\"",
+        &format!("echo planted > /proc/{}/fd/3", line.trim()),
     ];
     let results: Vec<Output> = attempts.iter().map(|a| f.outsider(a)).collect();
     let content = stdout(&f.unlocked_shell("cat \"$MNT/config\"; ls \"$MNT\""));
