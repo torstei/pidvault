@@ -1,11 +1,11 @@
 [package]
-name = "sshvault"
+name = "pidvault"
 version = "0.3.1"
 edition = "2024"
 description = "Per-shell access to an encrypted SSH configuration directory"
 license = "MIT OR Apache-2.0"
 authors = ["Torstein Tauno Svendsen <torstei@gmail.com>"]
-repository = "https://github.com/torstei/sshvault"
+repository = "https://github.com/torstei/pidvault"
 
 [dependencies]
 age = "0.12.1"
@@ -38,22 +38,24 @@ undocumented_unsafe_blocks = "deny"
 
 [package.metadata.deb]
 extended-description = """\
-A shell that has run `sshvault unlock`, and every process it starts, sees the \
-decrypted SSH config under /run/sshvault/<vault> and can use its keys through \
+A shell that has run `pidvault unlock`, and every process it starts, sees the \
+decrypted SSH config under /run/pidvault/<vault> and can use its keys through \
 the vault agent, which never hands them out. Every other process of the same \
 user sees nothing."""
 changelog = "packaging/changelog.Debian"
 section = "net"
 copyright = "2026 Torstein Tauno Svendsen <torstei@gmail.com>"
 depends = "$auto"
+conflicts = "sshvault"
+replaces = "sshvault"
 assets = [
-    ["target/release/sshvault", "usr/bin/", "755"],
-    ["README.md", "usr/share/doc/sshvault/README.md", "644"],
-    ["CHANGELOG.md", "usr/share/doc/sshvault/changelog", "644"],
-    ["packaging/sshvault.1", "usr/share/man/man1/sshvault.1", "644"],
+    ["target/release/pidvault", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/pidvault/README.md", "644"],
+    ["CHANGELOG.md", "usr/share/doc/pidvault/changelog", "644"],
+    ["packaging/pidvault.1", "usr/share/man/man1/pidvault.1", "644"],
 ]
 maintainer-scripts = "packaging"
 systemd-units = [
     { unit-scripts = "packaging", enable = true, start = true },
-    { unit-scripts = "packaging", unit-name = "sshvault-mount", enable = true, start = true },
+    { unit-scripts = "packaging", unit-name = "pidvault-mount", enable = true, start = true },
 ]

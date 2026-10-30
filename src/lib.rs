@@ -1,4 +1,4 @@
-//! sshvault's modules, shared by the binary and the fuzz targets; not a stable API.
+//! pidvault's modules, shared by the binary and the fuzz targets; not a stable API.
 
 pub mod agent;
 pub mod daemon;

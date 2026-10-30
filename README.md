@@ -1,4 +1,4 @@
-# sshvault
+# pidvault
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15864/badge)](https://www.bestpractices.dev/projects/15864)
 
@@ -26,11 +26,11 @@ connection lets anyone run commands on that host without any key at all.
 
 None of this is a bug. On Unix, the boundary is the user id, and everything you run is you.
 
-## What sshvault does instead
+## What pidvault does instead
 
-Access is granted per shell, not per login. A shell that has run `sshvault unlock`, and
-every process it starts, sees your decrypted `config` under `/run/sshvault/default/` and
-can sign with the keys stored there — through sshvault's own agent, which answers only
+Access is granted per shell, not per login. A shell that has run `pidvault unlock`, and
+every process it starts, sees your decrypted `config` under `/run/pidvault/default/` and
+can sign with the keys stored there — through pidvault's own agent, which answers only
 processes of unlocked shells. The keys themselves cannot be read, not even from an
 unlocked shell, so nothing running there can take them along. Every other process running
 as you sees an empty directory and an agent with no keys. With several vaults, each shell
@@ -39,7 +39,7 @@ production keys.
 
 ## What it does not do
 
-sshvault is not the perfect solution. It is an attempt to make this noticeably better
+pidvault is not the perfect solution. It is an attempt to make this noticeably better
 without making SSH painful to work with: you unlock once per shell, and everything else
 behaves as before. It draws the line at the shell you unlocked, and a lot is still yours
 to get right:
@@ -51,9 +51,9 @@ to get right:
   elsewhere.
 - **A replaced `ssh`, or strange things in `$PATH`.** Your own processes can write to
   `~/.local/bin`, `~/.bashrc` and the other files your shell trusts. An alias, a function
-  or a binary planted there runs inside the next shell you unlock, and sshvault cannot
+  or a binary planted there runs inside the next shell you unlock, and pidvault cannot
   tell it from the real thing.
-- **The sshvault block in `~/.ssh/config`.** It is editable the same way, and an entry
+- **The pidvault block in `~/.ssh/config`.** It is editable the same way, and an entry
   placed above it wins. `sudo chattr +i ~/.ssh ~/.ssh/config` stops that; `authorized_keys`
   and `known_hosts` stay editable in place.
 - **Watching or taking over an unlocked shell.** A process that can trace the shell
@@ -70,45 +70,65 @@ The full list, with what each guarantee rests on, is in
 For Ubuntu 24.04 or later, on amd64, from the project's signed apt repository:
 
 ```sh
-sudo curl -fsSLo /etc/apt/keyrings/sshvault.asc https://torstei.github.io/sshvault/sshvault.asc
-echo "deb [signed-by=/etc/apt/keyrings/sshvault.asc] https://torstei.github.io/sshvault stable main" \
-  | sudo tee /etc/apt/sources.list.d/sshvault.list
-sudo apt update && sudo apt install sshvault
+sudo curl -fsSLo /etc/apt/keyrings/pidvault.asc https://torstei.github.io/pidvault/pidvault.asc
+echo "deb [signed-by=/etc/apt/keyrings/pidvault.asc] https://torstei.github.io/pidvault stable main" \
+  | sudo tee /etc/apt/sources.list.d/pidvault.list
+sudo apt update && sudo apt install pidvault
 ```
 
 The repository is signed with the key with fingerprint
 `D1434A919B60EEC6384F3CB716EFFB5096BD7539`; check it with
-`gpg --show-keys /etc/apt/keyrings/sshvault.asc` before trusting it. The same key is in
-this repository as `packaging/sshvault-apt.asc`. Each `.deb` on the
-[releases page](https://github.com/torstei/sshvault/releases) also carries a build
-attestation: `gh attestation verify sshvault_*.deb --repo torstei/sshvault` shows that it
+`gpg --show-keys /etc/apt/keyrings/pidvault.asc` before trusting it. The same key is in
+this repository as `packaging/pidvault-apt.asc`. Each `.deb` on the
+[releases page](https://github.com/torstei/pidvault/releases) also carries a build
+attestation: `gh attestation verify pidvault_*.deb --repo torstei/pidvault` shows that it
 was built by this repository's release workflow, and from which commit.
 
 Installing starts the service. Upgrading restarts it, which locks every shell.
 
+### Moving from sshvault
+
+pidvault was called sshvault up to 0.3.1. Its apt repository moved with the name, so the
+old one gets no more updates. Swap the source; the signing key is the same:
+
+```sh
+sudo rm /etc/apt/sources.list.d/sshvault.list /etc/apt/keyrings/sshvault.asc
+```
+
+then follow Installing. Installing pidvault removes sshvault and takes over its vaults,
+which keep their passphrases. What is left is the paths in your own files. Replace the
+sshvault block at the top of `~/.ssh/config` with the output of `pidvault stub`, then, in
+a shell with every vault unlocked:
+
+```sh
+sed -i 's|/run/sshvault|/run/pidvault|g' /run/pidvault/*/config
+```
+
+The `sshvault` account stays behind, unused; `sudo userdel sshvault` removes it.
+
 ## How it is meant to be used
 
 ```sh
-sudo apt install sshvault                   # once per machine; see Installing
-sshvault create                             # once: asks for a passphrase, unlocks this shell
-$EDITOR /run/sshvault/default/config        # starts as a commented example
-sshvault stub                               # once: put its output at the top of ~/.ssh/config
-sshvault unlock                             # in each further shell that should have access
+sudo apt install pidvault                   # once per machine; see Installing
+pidvault create                             # once: asks for a passphrase, unlocks this shell
+$EDITOR /run/pidvault/default/config        # starts as a commented example
+pidvault stub                               # once: put its output at the top of ~/.ssh/config
+pidvault unlock                             # in each further shell that should have access
 ```
 
 `create` and `import` unlock the shell they ran in; `--no-unlock` leaves it locked.
-`sshvault create --from DIR` starts from the files in a directory instead of an empty
+`pidvault create --from DIR` starts from the files in a directory instead of an empty
 vault. Keys you copy in from `~/.ssh` have been readable by every process you ran so far:
 the clean move is to generate new ones straight into the vault, e.g.
-`ssh-keygen -t ed25519 -N '' -f /run/sshvault/default/id_ed25519`, and retire the old ones.
+`ssh-keygen -t ed25519 -N '' -f /run/pidvault/default/id_ed25519`, and retire the old ones.
 
-`sshvault stub` prints a block that must sit at the top of `~/.ssh/config`:
+`pidvault stub` prints a block that must sit at the top of `~/.ssh/config`:
 
 ```
-Match exec "/usr/bin/sshvault status --quiet"
-    IdentityAgent /run/sshvault-agent.sock
+Match exec "/usr/bin/pidvault status --quiet"
+    IdentityAgent /run/pidvault-agent.sock
     AddKeysToAgent no
-    Include /run/sshvault/*/config
+    Include /run/pidvault/*/config
 ```
 
 In a shell with a vault unlocked, the vaults' entries take precedence and ssh signs
@@ -120,7 +140,7 @@ your desktop agent, so a key you still keep there works only in other shells unt
 move it into a vault.
 
 If that block is more magic than you want in `~/.ssh/config`, leave it out and name the
-vault's config yourself: `ssh -F /run/sshvault/default/config HOST`. A new vault's
+vault's config yourself: `ssh -F /run/pidvault/default/config HOST`. A new vault's
 starter `config` already points ssh at the vault agent, so nothing else is needed. `-F`
 replaces `~/.ssh/config` and `/etc/ssh/ssh_config` rather than adding to them; jump hosts
 work with `ProxyJump`, which passes `-F` on, but not with a `ProxyCommand` running
@@ -132,20 +152,20 @@ editors, `sed -i`, `ssh-keygen` and `ssh` itself all work. Changes are saved on 
 when a written file is closed, on a rename, and otherwise within a second.
 
 Inside the vault, refer to files through the mount, e.g.
-`IdentityFile /run/sshvault/default/id_ed25519` (with its `.pub` beside it) and
-`UserKnownHostsFile /run/sshvault/default/known_hosts`. Keep `ControlPath` elsewhere
+`IdentityFile /run/pidvault/default/id_ed25519` (with its `.pub` beside it) and
+`UserKnownHostsFile /run/pidvault/default/known_hosts`. Keep `ControlPath` elsewhere
 (`$XDG_RUNTIME_DIR`): unix sockets cannot live on the mount. A vault holds up to 4 MiB.
 
-`sshvault unlock --for 30m` makes any unlock end by itself; `status` shows how long is
+`pidvault unlock --for 30m` makes any unlock end by itself; `status` shows how long is
 left. Once no shell has a vault unlocked, its decrypted contents and key leave memory.
 
-Other commands: `sshvault status`, `sshvault lock` (this shell) and `sshvault lock --all`
-(every shell), and `sshvault passwd` to change a passphrase.
+Other commands: `pidvault status`, `pidvault lock` (this shell) and `pidvault lock --all`
+(every shell), and `pidvault passwd` to change a passphrase.
 
 To see which shells have a vault unlocked, put this at the end of `~/.bashrc`:
 
 ```sh
-eval "$(sshvault shell-init)"
+eval "$(pidvault shell-init)"
 ```
 
 While a shell has a vault unlocked, its prompt starts with a red marker naming the vault
@@ -157,7 +177,7 @@ of your prompt stays as it was.
 ### Keys and the agent
 
 A file in a vault is a key when it is an unencrypted private key in OpenSSH format, as
-`ssh-keygen -N ''` writes them. sshvault tells by its first bytes, which hold nothing
+`ssh-keygen -N ''` writes them. pidvault tells by its first bytes, which hold nothing
 secret, so a key is protected from the moment it is written:
 
 - It shows as mode `200` and cannot be opened for reading by anyone. Its bytes cannot be
@@ -177,7 +197,7 @@ secret, so a key is protected from the moment it is written:
   the passphrase, after which the key is protected). Keys in the old PEM format stay
   ordinary too; `ssh-keygen -p -f KEY` rewrites them in OpenSSH format.
 
-To bring in a key you already have, `sshvault add-key ~/.ssh/id_github` (with `--vault`
+To bring in a key you already have, `pidvault add-key ~/.ssh/id_github` (with `--vault`
 and `--name` if you like) asks once for its passphrase, if it has one, and writes the key
 without it, and its `.pub`, into the vault. The original is left alone: it has been
 readable by every process you ran, so retire it once the copy works.
@@ -188,7 +208,7 @@ Unlock it for just as long as you need it, and it locks again by itself even if 
 forget:
 
 ```sh
-sshvault unlock signing --for 10m           # also 90s, 1h30m; unlocking again sets a new limit
+pidvault unlock signing --for 10m           # also 90s, 1h30m; unlocking again sets a new limit
 ```
 
 ssh tells the agent which connections it opens on behalf of a host you forward your
@@ -196,21 +216,21 @@ agent to. On those, the vault agent offers no key unless the vault's `agent.toml
 it, so remote root cannot sign with your keys even where `ForwardAgent yes` is set:
 
 ```toml
-# /run/sshvault/default/agent.toml
+# /run/pidvault/default/agent.toml
 [keys."id_jump"]          # the key's path in the vault
 forward = true            # may sign through hosts this agent is forwarded to
 ```
 
-A policy that cannot be read lets nothing be forwarded, and `sshvault status` says why.
+A policy that cannot be read lets nothing be forwarded, and `pidvault status` says why.
 Older ssh versions do not mark forwarded connections; with those, everything looks local.
 
 ### More than one vault
 
 ```sh
-sshvault create prod                        # its own key, and its own passphrase if you like
-sshvault unlock prod                        # in the shell that should have it
-$EDITOR /run/sshvault/prod/config
-sshvault lock prod                          # lock just that one
+pidvault create prod                        # its own key, and its own passphrase if you like
+pidvault unlock prod                        # in the shell that should have it
+$EDITOR /run/pidvault/prod/config
+pidvault lock prod                          # lock just that one
 ```
 
 Every command takes a vault name and defaults to `default`; `export` and `import` take
@@ -222,8 +242,8 @@ supported.
 ### Backups and moving to another machine
 
 ```sh
-sshvault export ~/sshvault-backup.age       # from an unlocked shell; asks for the passphrase
-sshvault import ~/sshvault-backup.age       # on the new machine; asks for its passphrase
+pidvault export ~/pidvault-backup.age       # from an unlocked shell; asks for the passphrase
+pidvault import ~/pidvault-backup.age       # on the new machine; asks for its passphrase
 ```
 
 An export is a standard [age](https://age-encryption.org) file encrypted with your
@@ -231,24 +251,24 @@ passphrase, holding a tar archive of the vault (`age -d backup.age | tar -t` lis
 Only an unlocked shell may export, so your other processes cannot even get a copy to try
 passphrases against. `import` checks the passphrase before storing anything. Replacing an
 existing vault also needs an unlocked shell. The old one is kept as
-`<name>.sshvault.previous`, where an administrator can restore it, and shells that are
+`<name>.pidvault.previous`, where an administrator can restore it, and shells that are
 already unlocked see the new contents at once.
 
 ## How it works
 
-- One daemon per machine, running as the `sshvault` account and never as root: no
+- One daemon per machine, running as the `pidvault` account and never as root: no
   capabilities, a read-only system, no `/home`, no devices, no network and a system-call
   allow-list (`systemd-analyze security` rates it 0.5, "safe"). systemd creates its sockets
   in root's `/run`, and a separate, minimal root service does the one thing that needs
-  root: it mounts the FUSE filesystem at `/run/sshvault`, hands the connection to the
+  root: it mounts the FUSE filesystem at `/run/pidvault`, hands the connection to the
   daemon, and unmounts as soon as the daemon is gone. Your processes cannot signal the
   daemon, trace it, read its memory, unmount the view or place a socket or file where it
   lives.
 - The client refuses a daemon that runs as your own uid or whose socket directory is not
   root's: such a daemon could be any of your processes, waiting for your passphrase.
-- Each vault is one file, `/var/lib/sshvault/<uid>/<name>.sshvault`, readable only by the
+- Each vault is one file, `/var/lib/pidvault/<uid>/<name>.pidvault`, readable only by the
   daemon. Vaults belong to the uid, as a home directory does: renaming an account keeps
-  them, and when an account is deleted its `/var/lib/sshvault/<uid>` should go with its
+  them, and when an account is deleted its `/var/lib/pidvault/<uid>` should go with its
   home directory, or a later account given the same uid will find them listed (though it
   cannot open them). It holds a random 256-bit key K encrypted with your passphrase, and the contents
   encrypted with K, both in `age` passphrase format; one file, so a save replaces both in
@@ -282,7 +302,7 @@ already unlocked see the new contents at once.
   vaults may hold 16 MiB together (4 MiB each), counted as they would be saved, so even a
   vault of thousands of empty files cannot take memory from other users.
 - `unlock` registers the shell that ran it, and only if that shell is in the same session:
-  a client orphaned with `(sshvault unlock &)` is adopted by `systemd --user`, which must
+  a client orphaned with `(pidvault unlock &)` is adopted by `systemd --user`, which must
   not end up unlocking the whole login.
 
 ## Development
@@ -290,16 +310,16 @@ already unlocked see the new contents at once.
 ```sh
 cargo test          # unit and end-to-end tests, no root needed
 tests/vm/run.sh     # the .deb, systemd and root paths, in a throwaway VM; no sudo
-cargo deb           # target/debian/sshvault_<version>_amd64.deb
+cargo deb           # target/debian/pidvault_<version>_amd64.deb
 ```
 
 The end-to-end tests need `/dev/fuse` and `fusermount3`. They run the daemon with
-`--unprivileged` and set `SSHVAULT_INSECURE_ALLOW_SAME_UID_DAEMON`, which is exactly the
+`--unprivileged` and set `PIDVAULT_INSECURE_ALLOW_SAME_UID_DAEMON`, which is exactly the
 setup the client otherwise refuses. One test logs in to a throwaway `sshd` on a random
 local port with a key that exists only in the vault.
 
 `tests/vm/run.sh` needs access to `/dev/kvm`, `qemu-system-x86_64`, `genisoimage`, `gpgv`
-and `cargo-deb`. It downloads the Ubuntu cloud image once into `~/.cache/sshvault-vm`,
+and `cargo-deb`. It downloads the Ubuntu cloud image once into `~/.cache/pidvault-vm`,
 checked against Ubuntu's signed `SHA256SUMS`, and boots two VMs in parallel, each from a
 fresh overlay. In one, `tests/vm/guest-tests.sh` installs the package and tests it as root,
 with two users whose processes run under real `systemd --user` managers, then reinstalls,
@@ -318,12 +338,12 @@ directory where there is one. CI fuzzes each target for two minutes on every cha
 for half an hour weekly, keeping the corpus between runs.
 
 `packaging/` has the systemd units — the daemon and its sockets, and the mount helper and
-its socket — and the `sysusers.d` entry for the `sshvault` account.
+its socket — and the `sysusers.d` entry for the `pidvault` account.
 
 `cargo deny check` (configured in `deny.toml`, whose accepted advisories
 `osv-scanner.toml` repeats for Scorecard, with a copy in `fuzz/`) checks dependencies against the RustSec
 advisories, the allowed licenses and crates.io as the only source; CI runs it, and lintian on
-the package. `packaging/sshvault.1` and `packaging/changelog.Debian` are generated: tests
+the package. `packaging/pidvault.1` and `packaging/changelog.Debian` are generated: tests
 fail when they are stale and say how to regenerate them.
 
 To release, bump the version in `Cargo.toml`, turn `## Unreleased` in `CHANGELOG.md` into
@@ -336,8 +356,8 @@ environment before it creates the GitHub release, signs the apt repository (buil
 `scripts/build-apt-repo.sh` from every released package) and publishes it on GitHub Pages.
 Only that approved job can reach the signing key.
 
-Anyone can check a downloaded package with `gh attestation verify sshvault_X.Y.Z-1_amd64.deb
---repo torstei/sshvault`, adding `--bundle` with the release's `.sigstore.json` to check it
+Anyone can check a downloaded package with `gh attestation verify pidvault_X.Y.Z-1_amd64.deb
+--repo torstei/pidvault`, adding `--bundle` with the release's `.sigstore.json` to check it
 without asking GitHub, or rebuild it from the tag and compare: with the Rust version
 named in the release notes, `SOURCE_DATE_EPOCH` set to the tagged commit's time
 (`git log -1 --format=%ct`), `cargo auditable build --release --locked` and

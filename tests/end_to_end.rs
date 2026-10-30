@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-const BIN: &str = env!("CARGO_BIN_EXE_sshvault");
+const BIN: &str = env!("CARGO_BIN_EXE_pidvault");
 const PASSPHRASE: &str = "correct horse battery staple";
 
 struct Fixture {
@@ -121,10 +121,10 @@ impl Fixture {
 
     fn command(&self, program: &str) -> Command {
         let mut cmd = Command::new(program);
-        cmd.env("SSHVAULT_SOCKET", self.path("control.sock"))
-            .env("SSHVAULT_AGENT_SOCKET", self.path("agent.sock"))
-            .env("SSHVAULT_MOUNT", self.path("mnt"))
-            .env("SSHVAULT_INSECURE_ALLOW_SAME_UID_DAEMON", "1")
+        cmd.env("PIDVAULT_SOCKET", self.path("control.sock"))
+            .env("PIDVAULT_AGENT_SOCKET", self.path("agent.sock"))
+            .env("PIDVAULT_MOUNT", self.path("mnt"))
+            .env("PIDVAULT_INSECURE_ALLOW_SAME_UID_DAEMON", "1")
             .env("SV", BIN)
             .env("MNT", self.mnt())
             .env_remove("SSH_AUTH_SOCK");
@@ -343,7 +343,7 @@ fn only_unlocked_shells_can_write() {
         "echo planted >> \"$MNT/config\"",
         "rm \"$MNT/config\"",
         "mkdir \"$MNT/dir\"",
-        "echo planted > \"$SSHVAULT_MOUNT/new\"",
+        "echo planted > \"$PIDVAULT_MOUNT/new\"",
         &format!("echo planted > /proc/{}/fd/3", line.trim()),
     ];
     let results: Vec<Output> = attempts.iter().map(|a| f.outsider(a)).collect();
@@ -612,7 +612,7 @@ fn client_refuses_a_daemon_running_as_its_own_user() {
     };
     let o = f
         .command("sh")
-        .env_remove("SSHVAULT_INSECURE_ALLOW_SAME_UID_DAEMON")
+        .env_remove("PIDVAULT_INSECURE_ALLOW_SAME_UID_DAEMON")
         .env("PW", PASSPHRASE)
         .args([
             "-c",
@@ -645,7 +645,7 @@ fn the_mount_lists_only_the_callers_vaults_which_belong_to_the_caller() {
     let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
         return;
     };
-    let o = f.outsider("ls -A \"$SSHVAULT_MOUNT\"; stat -c '%A %U' \"$MNT\" \"$SSHVAULT_MOUNT\"");
+    let o = f.outsider("ls -A \"$PIDVAULT_MOUNT\"; stat -c '%A %U' \"$MNT\" \"$PIDVAULT_MOUNT\"");
     assert_eq!(
         stdout(&o),
         format!(
@@ -655,7 +655,7 @@ fn the_mount_lists_only_the_callers_vaults_which_belong_to_the_caller() {
         )
     );
     for name in ["work", "root", ".."] {
-        let probe = f.outsider(&format!("ls \"$SSHVAULT_MOUNT/{name}/config\""));
+        let probe = f.outsider(&format!("ls \"$PIDVAULT_MOUNT/{name}/config\""));
         assert!(!probe.status.success(), "{name}: {probe:?}");
     }
 }
@@ -679,7 +679,7 @@ fn create_named(f: &Fixture, name: &str, config: &str) {
         &[],
         &format!(
             "printf '%s\\n' \"$PW\" | \"$SV\" create {name} --no-unlock --passphrase-stdin --work-factor 10 >/dev/null || exit 1\n\
-             printf '%s\\n' \"$PW\" | \"$SV\" unlock {name} --passphrase-stdin >/dev/null && printf '{config}' > \"$SSHVAULT_MOUNT/{name}/config\""
+             printf '%s\\n' \"$PW\" | \"$SV\" unlock {name} --passphrase-stdin >/dev/null && printf '{config}' > \"$PIDVAULT_MOUNT/{name}/config\""
         ),
     );
     assert!(o.status.success(), "{o:?}");
@@ -691,7 +691,7 @@ fn a_shell_sees_only_the_vaults_it_unlocked() {
         return;
     };
     create_named(&f, "work", "Host w\n  User fromwork\n");
-    let read_both = "cat \"$SSHVAULT_MOUNT/default/config\" 2>/dev/null; cat \"$SSHVAULT_MOUNT/work/config\" 2>/dev/null; ls \"$SSHVAULT_MOUNT\"";
+    let read_both = "cat \"$PIDVAULT_MOUNT/default/config\" 2>/dev/null; cat \"$PIDVAULT_MOUNT/work/config\" 2>/dev/null; ls \"$PIDVAULT_MOUNT\"";
     assert_eq!(
         stdout(&shell_with(&f, &["work"], read_both)),
         "Host w\n  User fromwork\ndefault\nwork\n"
@@ -707,7 +707,7 @@ fn a_shell_sees_only_the_vaults_it_unlocked() {
     let write_other = shell_with(
         &f,
         &["work"],
-        "echo planted >> \"$SSHVAULT_MOUNT/default/config\"",
+        "echo planted >> \"$PIDVAULT_MOUNT/default/config\"",
     );
     assert!(!write_other.status.success());
 }
@@ -721,7 +721,7 @@ fn lock_can_lock_one_vault() {
     let o = shell_with(
         &f,
         &["default", "work"],
-        "\"$SV\" lock work >/dev/null; cat \"$SSHVAULT_MOUNT/work/config\" 2>/dev/null; cat \"$MNT/config\"; \"$SV\" status",
+        "\"$SV\" lock work >/dev/null; cat \"$PIDVAULT_MOUNT/work/config\" 2>/dev/null; cat \"$MNT/config\"; \"$SV\" status",
     );
     let out = stdout(&o);
     assert!(out.starts_with(CONFIG), "{o:?}");
@@ -753,10 +753,10 @@ fn a_vault_stored_before_vaults_had_names_becomes_the_default() {
     };
     f.stop_daemon();
     let dir = f.path(&format!("state/{}", uid()));
-    std::fs::rename(dir.join("default.sshvault"), dir.join("vault.sshvault")).unwrap();
+    std::fs::rename(dir.join("default.pidvault"), dir.join("vault.pidvault")).unwrap();
     f.spawn_daemon();
     assert_eq!(stdout(&f.unlocked_shell("cat \"$MNT/config\"")), CONFIG);
-    assert!(!dir.join("vault.sshvault").exists());
+    assert!(!dir.join("vault.pidvault").exists());
 }
 
 #[test]
@@ -933,7 +933,7 @@ fn replacing_a_vault_needs_an_unlocked_shell_and_keeps_the_old_one() {
     ]);
     let o = shell.output().unwrap();
     assert_eq!(stdout(&o), OTHER, "{o:?}");
-    let previous = f.path(&format!("state/{}/default.sshvault.previous", uid()));
+    let previous = f.path(&format!("state/{}/default.pidvault.previous", uid()));
     assert!(previous.exists(), "no backup at {}", previous.display());
 }
 
@@ -1090,15 +1090,15 @@ fn the_agent_offers_vault_keys_only_to_unlocked_shells() {
     };
     let o = f.unlocked_shell(
         r#"ssh-keygen -q -t ed25519 -N '' -C vault-key -f "$MNT/id_agent"
-           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l | grep -c vault-key
+           SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l | grep -c vault-key
            ssh-keygen -q -t ed25519 -N '' -f /tmp/extra-$$
-           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add /tmp/extra-$$ 2>/dev/null && echo added
+           SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add /tmp/extra-$$ 2>/dev/null && echo added
            rm -f /tmp/extra-$$ /tmp/extra-$$.pub
            "$SV" lock >/dev/null
-           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l"#,
+           SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l"#,
     );
     assert_eq!(stdout(&o), "1\nThe agent has no identities.\n", "{o:?}");
-    let outsider = f.outsider(r#"SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l"#);
+    let outsider = f.outsider(r#"SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l"#);
     assert_eq!(stdout(&outsider), "The agent has no identities.\n");
 }
 
@@ -1195,7 +1195,7 @@ fn add_key_brings_a_protected_key_in_without_its_passphrase() {
         r#"echo 'old secret' | "$SV" add-key --passphrase-stdin --name id_github '{}' >/dev/null || exit 1
            stat -c %a "$MNT/id_github"
            cut -d' ' -f3 "$MNT/id_github.pub"
-           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l | grep -c old-key"#,
+           SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l | grep -c old-key"#,
         original.display()
     ));
     assert_eq!(stdout(&o), "200\nold-key\n1\n", "{o:?}");
@@ -1245,8 +1245,8 @@ fn add_key_takes_an_unprotected_key_into_a_named_vault() {
         &["signing"],
         &format!(
             r#""$SV" add-key --vault signing '{}' </dev/null >/dev/null || exit 1
-               ls "$SSHVAULT_MOUNT/signing"
-               SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l | grep -c sign-key"#,
+               ls "$PIDVAULT_MOUNT/signing"
+               SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l | grep -c sign-key"#,
             original.display()
         ),
     );
@@ -1310,10 +1310,10 @@ fn an_unlock_for_a_while_ends_by_itself() {
             r#"printf '%s\n' "$PW" | "$SV" unlock --for 4s --passphrase-stdin
            ssh-keygen -q -t ed25519 -N '' -C timed -f "$MNT/id_timed"
            "$SV" status | grep -c 'for another'
-           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l | grep -c timed
+           SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l | grep -c timed
            sleep 5
            cat "$MNT/config" 2>/dev/null || echo locked
-           SSH_AUTH_SOCK="$SSHVAULT_AGENT_SOCKET" ssh-add -l
+           SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l
            "$SV" status"#,
         ])
         .output()
@@ -1345,12 +1345,12 @@ fn the_prompt_marks_a_shell_while_it_has_a_vault_unlocked() {
             "-c",
             r#"eval "$("$SV" shell-init)"
            PS1='$ '
-           __sshvault_prompt; printf '%s\n' "$PS1"
+           __pidvault_prompt; printf '%s\n' "$PS1"
            printf '%s\n' "$PW" | "$SV" unlock --for 10m --passphrase-stdin >/dev/null
-           (exit 3); __sshvault_prompt; echo "status $?"
-           __sshvault_prompt; printf '%s\n' "$PS1"
+           (exit 3); __pidvault_prompt; echo "status $?"
+           __pidvault_prompt; printf '%s\n' "$PS1"
            "$SV" lock >/dev/null
-           __sshvault_prompt; printf '%s\n' "$PS1"
+           __pidvault_prompt; printf '%s\n' "$PS1"
            echo "${PROMPT_COMMAND[@]}""#,
         ])
         .output()
@@ -1362,7 +1362,7 @@ fn the_prompt_marks_a_shell_while_it_has_a_vault_unlocked() {
         out.starts_with(&format!("$ \nstatus 3\n{marked}\n\x1b]2;")),
         "{o:?}"
     );
-    assert!(out.ends_with("\x07$ \n__sshvault_prompt\n"), "{o:?}");
+    assert!(out.ends_with("\x07$ \n__pidvault_prompt\n"), "{o:?}");
 }
 
 #[test]

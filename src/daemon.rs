@@ -49,7 +49,7 @@ pub fn mount_helper(mount: &Path) -> Result<()> {
         match mount_fuse(mount) {
             Ok(fuse) => systemd::send_fd(&stream, &fuse)?,
             Err(e) => {
-                eprintln!("sshvault: {e:#}");
+                eprintln!("pidvault: {e:#}");
                 continue;
             }
         }
@@ -88,9 +88,9 @@ fn mount_fuse(mount: &Path) -> Result<std::os::fd::OwnedFd> {
     // SAFETY: every pointer is to a NUL-terminated string that outlives the call
     let rc = unsafe {
         libc::mount(
-            c"sshvault".as_ptr(),
+            c"pidvault".as_ptr(),
             path.as_ptr(),
-            c"fuse.sshvault".as_ptr(),
+            c"fuse.pidvault".as_ptr(),
             libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
             data.as_ptr().cast(),
         )
@@ -131,8 +131,8 @@ pub fn run(options: &Options) -> Result<()> {
             MountOption::NoDev,
             MountOption::NoExec,
             MountOption::DefaultPermissions,
-            MountOption::FSName("sshvault".into()),
-            MountOption::Subtype("sshvault".into()),
+            MountOption::FSName("pidvault".into()),
+            MountOption::Subtype("pidvault".into()),
         ];
         let session = Session::new(fs, &options.mount, &config)
             .with_context(|| format!("mounting {}", options.mount.display()))?;
@@ -208,7 +208,7 @@ pub fn run(options: &Options) -> Result<()> {
     }
 
     eprintln!(
-        "sshvault: serving {} on {}{}",
+        "pidvault: serving {} on {}{}",
         options.mount.display(),
         options.socket.display(),
         if options.unprivileged {
@@ -323,7 +323,7 @@ fn with_new_vault<T>(
 }
 
 fn needs_unlock(name: &str) -> String {
-    format!("needs `{name}` unlocked in this shell; run `sshvault unlock {name}` first")
+    format!("needs `{name}` unlocked in this shell; run `pidvault unlock {name}` first")
 }
 
 // The scrypt steps take about a second, so they run outside the state lock; every
@@ -457,7 +457,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             let (shell, handle) = calling_shell(&peer)?;
             let path = with_vault(ctx, &peer, &name, |vault, _| Ok(vault.path.clone()))?;
             if !path.exists() {
-                bail!("you have no vault `{name}`; create one with `sshvault create {name}`");
+                bail!("you have no vault `{name}`; create one with `pidvault create {name}`");
             }
             let stored = Stored::read(&path)?;
             let key = ctx.guesses.check(peer.uid, || {
@@ -573,7 +573,7 @@ fn calling_shell(peer: &procs::PeerCred) -> Result<(u32, Pidfd)> {
     // an orphaned client is adopted by a subreaper such as `systemd --user`,
     // whose descendants are the whole login; it leads a session of its own
     if shell <= 1 || procs::session_of(shell) != procs::session_of(peer.pid) {
-        bail!("run sshvault directly from the shell it is meant to unlock");
+        bail!("run pidvault directly from the shell it is meant to unlock");
     }
     Ok((shell, handle))
 }

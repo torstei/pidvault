@@ -1,6 +1,6 @@
-# sshvault security design
+# pidvault security design
 
-This is the assurance case for sshvault: what it protects, from whom, where the trust
+This is the assurance case for pidvault: what it protects, from whom, where the trust
 boundaries are, which claims it makes and why they hold, and what it leaves open. The
 README describes the same mechanisms for users; this document is for reviewers, and
 names the code and tests behind each claim. It describes the version on `main`.
@@ -21,12 +21,12 @@ names the code and tests behind each claim. It describes the version on `main`.
 | | Adversary | Can |
 |---|---|---|
 | A1 | A process of the vault's owner outside an unlocked shell: an AI agent, a browser, a `curl \| sh` script, a build script | Everything the owner's uid can: read and write the home directory, connect to any socket the owner can, read `/proc` of the owner's processes, signal them, and trace its own descendants (with Yama's default `ptrace_scope` of 1) |
-| A2 | Another local user | Connect to sshvault's sockets and use the mount, as themselves |
+| A2 | Another local user | Connect to pidvault's sockets and use the mount, as themselves |
 | A3 | A remote host the owner forwards their agent to, including its root | Send agent requests through the forwarded connection |
 | A4 | Someone with a copy of a stored vault or an export: a backup, a stolen disk | Guess passphrases offline |
 | A5 | The supply chain: a dependency, the build, the apt repository | Change what runs |
 
-A1 is the reason sshvault exists. The others are the boundaries any multi-user service
+A1 is the reason pidvault exists. The others are the boundaries any multi-user service
 on the machine must hold anyway.
 
 ### Out of scope
@@ -38,7 +38,7 @@ on the machine must hold anyway.
   next shell unlocked. It cannot read the keys themselves.
 - **Code the owner's shell trusts.** A1 can write `~/.bashrc`, `~/.local/bin` and
   `~/.ssh/config`, so what it plants there runs in the next shell the owner unlocks.
-- **Anyone who learns the passphrase.** They can run `sshvault unlock` themselves. See
+- **Anyone who learns the passphrase.** They can run `pidvault unlock` themselves. See
   [Known limitations](#known-limitations) for the ways a passphrase can be observed.
 - **Physical access to a running machine,** and hibernation, which writes memory to disk.
 
@@ -49,27 +49,27 @@ on the machine must hold anyway.
    │        │        │              │                                   │
    │ FUSE   │ agent  │ control      │ (same three interfaces)           │ via ssh in an unlocked shell
    ▼        ▼        ▼              ▼                                   ▼
- /run/sshvault  /run/sshvault-agent.sock  /run/sshvault.sock
+ /run/pidvault  /run/pidvault-agent.sock  /run/pidvault.sock
  (kernel: uid    (SO_PEERCRED, pidfd)      (SO_PEERCRED)
   and pid of
   each request)
-   └──────────────── daemon, uid sshvault, sandboxed ─────────────────┘
+   └──────────────── daemon, uid pidvault, sandboxed ─────────────────┘
                      │                               ▲
                      ▼                               │ /dev/fuse fd, once
-           /var/lib/sshvault/<uid>/<name>.sshvault   sshvault-mount (root, CAP_SYS_ADMIN only)
-           (0700/0600, sshvault)
+           /var/lib/pidvault/<uid>/<name>.pidvault   pidvault-mount (root, CAP_SYS_ADMIN only)
+           (0700/0600, pidvault)
 ```
 
 - **The kernel tells the daemon who is asking.** FUSE requests carry the caller's uid and
   pid; the sockets give the peer's credentials (`SO_PEERCRED`) and a pidfd
   (`SO_PEERPIDFD`). Nothing a client sends about itself is trusted.
-- **The daemon** runs as the `sshvault` account with no capabilities, a read-only system,
+- **The daemon** runs as the `pidvault` account with no capabilities, a read-only system,
   no `/home`, devices or network, and a system-call allow-list
-  (`packaging/sshvault.service`). It owns the vault files.
-- **The mount helper** is the only root code: it mounts `/run/sshvault`, passes the FUSE
+  (`packaging/pidvault.service`). It owns the vault files.
+- **The mount helper** is the only root code: it mounts `/run/pidvault`, passes the FUSE
   connection to the daemon, and unmounts when the daemon's connection closes
   (`daemon::mount_helper`). It reads nothing from the daemon but the connection itself.
-- **The client** (`sshvault` run by a user) trusts the daemon only if it runs as another
+- **The client** (`pidvault` run by a user) trusts the daemon only if it runs as another
   uid and its socket directory is root's (`protocol::authenticate_daemon`), so A1 cannot
   stand in for the daemon to collect a passphrase.
 
@@ -126,10 +126,10 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
 
 ### C4. Other users learn nothing about a user's vaults
 
-- A user's directory under `/run/sshvault` is their own inode, mode 0700 and listed only
+- A user's directory under `/run/pidvault` is their own inode, mode 0700 and listed only
   to them; another user asking for a vault by name gets `ENOENT`, whether or not it
   exists. Vault names are checked (`fs::check_vault_name`), and tar paths reduced to
-  normal components, so nothing escapes `/var/lib/sshvault/<uid>`.
+  normal components, so nothing escapes `/var/lib/pidvault/<uid>`.
 - Evidence: unit `hostile_vault_names_are_refused`,
   `every_accepted_name_stays_in_the_users_directory`; e2e
   `the_mount_lists_only_the_callers_vaults_which_belong_to_the_caller`; VM "a vault name
@@ -195,7 +195,7 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
   nothing; a client that cannot tell which shell called it unlocks nothing.
 - **Economy of mechanism.** One file format (age), one archive format (tar), and the
   kernel's own credentials instead of tokens or a protocol of its own for identity.
-- **Separation of privilege.** Mounting (root) and holding secrets (`sshvault`) are
+- **Separation of privilege.** Mounting (root) and holding secrets (`pidvault`) are
   separate services.
 - **Least common mechanism.** One daemon serves every user, which is what makes the
   per-user limits of C7 necessary.
@@ -218,7 +218,7 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
 
 ## Cryptography
 
-sshvault implements no cryptography of its own.
+pidvault implements no cryptography of its own.
 
 | Use | Algorithm | Library |
 |---|---|---|
@@ -271,6 +271,6 @@ Accepted advisories are listed, with reasons, in `deny.toml` and `osv-scanner.to
   buffers, may keep short-lived copies that are not wiped. They are in the daemon's
   memory, which is never swapped or dumped.
 - **No common-password check.** NIST also recommends refusing passphrases found in
-  breach corpora; sshvault checks only the length.
+  breach corpora; pidvault checks only the length.
 - **Hibernation** writes all memory, the daemon's included, to disk.
 - **P-521 keys** are not supported by the agent.

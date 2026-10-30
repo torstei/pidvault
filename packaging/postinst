@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+# Vaults left by the sshvault package, which this one replaces: same format, new name.
+# StateDirectory= hands them to the pidvault account when the service starts.
+if [ "$1" = configure ] && [ -d /var/lib/sshvault ] && [ ! -e /var/lib/pidvault ]; then
+    umask 077
+    mv /var/lib/sshvault /var/lib/pidvault
+    for dir in /var/lib/pidvault/*/; do
+        for old in "$dir"*.sshvault "$dir"*.sshvault.previous; do
+            [ -f "$old" ] || continue
+            [ "$(head -c 12 "$old")" = sshvault-v1 ] || continue
+            new=$(dirname "$old")/$(basename "$old" | sed 's/\.sshvault/.pidvault/')
+            { printf 'pidvault-v1\n'; tail -c +13 "$old"; } > "$new.migrating"
+            mv "$new.migrating" "$new"
+            rm "$old"
+        done
+        rm -f "$dir"*.sshvault.new
+    done
+fi
+
+#DEBHELPER#

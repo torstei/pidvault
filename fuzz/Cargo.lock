@@ -1533,6 +1533,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "pidvault"
+version = "0.3.1"
+dependencies = [
+ "age",
+ "anyhow",
+ "base64 0.23.1",
+ "clap",
+ "fuser",
+ "getrandom 0.4.3",
+ "libc",
+ "p256 0.14.0",
+ "p384 0.14.0",
+ "rpassword",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "signature 2.2.0",
+ "ssh-encoding",
+ "ssh-key",
+ "tar",
+ "toml 1.1.8+spec-1.1.0",
+ "zeroize",
+]
+
+[[package]]
+name = "pidvault-fuzz"
+version = "0.0.0"
+dependencies = [
+ "arbitrary",
+ "libfuzzer-sys",
+ "pidvault",
+ "serde_json",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2205,42 +2241,6 @@ dependencies = [
  "ssh-encoding",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "sshvault"
-version = "0.3.1"
-dependencies = [
- "age",
- "anyhow",
- "base64 0.23.1",
- "clap",
- "fuser",
- "getrandom 0.4.3",
- "libc",
- "p256 0.14.0",
- "p384 0.14.0",
- "rpassword",
- "rsa",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "signature 2.2.0",
- "ssh-encoding",
- "ssh-key",
- "tar",
- "toml 1.1.8+spec-1.1.0",
- "zeroize",
-]
-
-[[package]]
-name = "sshvault-fuzz"
-version = "0.0.0"
-dependencies = [
- "arbitrary",
- "libfuzzer-sys",
- "serde_json",
- "sshvault",
 ]
 
 [[package]]

@@ -1,10 +1,10 @@
 [Unit]
-Description=sshvault mount helper socket
+Description=pidvault mount helper socket
 
 [Socket]
-ListenStream=/run/sshvault-mount.sock
+ListenStream=/run/pidvault-mount.sock
 SocketUser=root
-SocketGroup=sshvault
+SocketGroup=pidvault
 # only the daemon may ask for the mount
 SocketMode=0660
 RemoveOnStop=yes

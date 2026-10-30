@@ -1,13 +1,13 @@
 [Unit]
-Description=sshvault mount helper
-Documentation=man:sshvault(1) https://github.com/torstei/sshvault
-Requires=sshvault-mount.socket
-After=sshvault-mount.socket
+Description=pidvault mount helper
+Documentation=man:pidvault(1) https://github.com/torstei/pidvault
+Requires=pidvault-mount.socket
+After=pidvault-mount.socket
 
 [Service]
 Type=exec
-ExecStart=/usr/bin/sshvault mount-helper
-ExecStopPost=-/usr/bin/umount --lazy /run/sshvault
+ExecStart=/usr/bin/pidvault mount-helper
+ExecStopPost=-/usr/bin/umount --lazy /run/pidvault
 Restart=on-failure
 UMask=0022
 

@@ -28,7 +28,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: Check that the tag matches Cargo.toml
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "sshvault") | .version')
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pidvault") | .version')
           [[ "v$version" == "$GITHUB_REF_NAME" ]] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $version" >&2; exit 1; }
       - name: Install the packaging tools
         run: cargo install cargo-deb cargo-auditable cargo-cyclonedx --locked
@@ -48,12 +48,12 @@ jobs:
           cmp dist/*.deb "$GITHUB_WORKSPACE"/dist/*.deb
       - name: Describe the dependencies
         run: |
-          cargo cyclonedx --format json --no-build-deps --override-filename sshvault.cdx
+          cargo cyclonedx --format json --no-build-deps --override-filename pidvault.cdx
           # SOURCE_DATE_EPOCH makes cargo cyclonedx leave out the random serial number,
           # which attest-sbom requires; one derived from the release keeps it reproducible
           serial=$(uuidgen --sha1 --namespace @url --name "https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME")
-          jq --arg serial "urn:uuid:$serial" '.serialNumber = $serial' sshvault.cdx.json > dist/sshvault.cdx.json
-          rm sshvault.cdx.json
+          jq --arg serial "urn:uuid:$serial" '.serialNumber = $serial' pidvault.cdx.json > dist/pidvault.cdx.json
+          rm pidvault.cdx.json
           rustc --version > dist/rustc-version.txt
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         id: provenance
@@ -69,7 +69,7 @@ jobs:
       - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: dist/*.deb
-          sbom-path: dist/sshvault.cdx.json
+          sbom-path: dist/pidvault.cdx.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: deb
@@ -97,7 +97,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.deb dist/*.sigstore.json dist/sshvault.cdx.json --verify-tag \
+          gh release create "$GITHUB_REF_NAME" dist/*.deb dist/*.sigstore.json dist/pidvault.cdx.json --verify-tag \
             --title "$GITHUB_REF_NAME" --notes "See [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md).
           Built reproducibly with $(cat dist/rustc-version.txt)."
       - name: Collect every released package
@@ -108,6 +108,8 @@ jobs:
           gh release list --limit 1000 --json tagName --jq '.[].tagName' | while read -r tag; do
             gh release download "$tag" --pattern '*.deb' --dir debs --clobber
           done
+          # releases from before the rename; pidvault replaces them
+          rm -f debs/sshvault_*.deb
       - name: Install apt-ftparchive
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends apt-utils
       - name: Build and sign the repository

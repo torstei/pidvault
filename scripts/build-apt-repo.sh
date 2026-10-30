@@ -16,8 +16,8 @@ cd "$out"
 apt-ftparchive packages pool > dists/stable/main/binary-amd64/Packages
 gzip -9 -k -n dists/stable/main/binary-amd64/Packages
 apt-ftparchive \
-    -o APT::FTPArchive::Release::Origin=sshvault \
-    -o APT::FTPArchive::Release::Label=sshvault \
+    -o APT::FTPArchive::Release::Origin=pidvault \
+    -o APT::FTPArchive::Release::Label=pidvault \
     -o APT::FTPArchive::Release::Suite=stable \
     -o APT::FTPArchive::Release::Codename=stable \
     -o APT::FTPArchive::Release::Architectures=amd64 \
@@ -26,20 +26,20 @@ apt-ftparchive \
 
 gpg --batch --yes --local-user "$key" --clearsign --output dists/stable/InRelease dists/stable/Release
 gpg --batch --yes --local-user "$key" --armor --detach-sign --output dists/stable/Release.gpg dists/stable/Release
-gpg --armor --export "$key" > sshvault.asc
+gpg --armor --export "$key" > pidvault.asc
 fingerprint=$(gpg --with-colons --fingerprint "$key" | awk -F: '$1 == "fpr" { print $10; exit }')
 
 cat > index.html <<HTML
 <!doctype html>
 <meta charset="utf-8">
-<title>sshvault apt repository</title>
-<h1>sshvault apt repository</h1>
-<p>For Ubuntu 24.04 or later, amd64. See <a href="https://github.com/torstei/sshvault">the project</a>.</p>
+<title>pidvault apt repository</title>
+<h1>pidvault apt repository</h1>
+<p>For Ubuntu 24.04 or later, amd64. See <a href="https://github.com/torstei/pidvault">the project</a>.</p>
 <pre>
-sudo curl -fsSLo /etc/apt/keyrings/sshvault.asc https://torstei.github.io/sshvault/sshvault.asc
-echo "deb [signed-by=/etc/apt/keyrings/sshvault.asc] https://torstei.github.io/sshvault stable main" \\
-  | sudo tee /etc/apt/sources.list.d/sshvault.list
-sudo apt update &amp;&amp; sudo apt install sshvault
+sudo curl -fsSLo /etc/apt/keyrings/pidvault.asc https://torstei.github.io/pidvault/pidvault.asc
+echo "deb [signed-by=/etc/apt/keyrings/pidvault.asc] https://torstei.github.io/pidvault stable main" \\
+  | sudo tee /etc/apt/sources.list.d/pidvault.list
+sudo apt update &amp;&amp; sudo apt install pidvault
 </pre>
 <p>Signing key fingerprint: <code>$fingerprint</code></p>
 HTML

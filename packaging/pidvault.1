@@ -1,21 +1,21 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH sshvault 1  "sshvault 0.3.1" 
+.TH pidvault 1  "pidvault 0.3.1" 
 .SH NAME
-sshvault \- Per\-shell access to an encrypted SSH configuration directory
+pidvault \- Per\-shell access to an encrypted SSH configuration directory
 .SH SYNOPSIS
-\fBsshvault\fR [\fB\-\-socket\fR] [\fB\-\-agent\-socket\fR] [\fB\-\-mount\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+\fBpidvault\fR [\fB\-\-socket\fR] [\fB\-\-agent\-socket\fR] [\fB\-\-mount\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
 .SH DESCRIPTION
 Per\-shell access to an encrypted SSH configuration directory
 .SH OPTIONS
 .TP
-\fB\-\-socket\fR \fI<SOCKET>\fR [default: /run/sshvault.sock]
+\fB\-\-socket\fR \fI<SOCKET>\fR [default: /run/pidvault.sock]
 Daemon control socket
 .TP
-\fB\-\-agent\-socket\fR \fI<AGENT_SOCKET>\fR [default: /run/sshvault\-agent.sock]
+\fB\-\-agent\-socket\fR \fI<AGENT_SOCKET>\fR [default: /run/pidvault\-agent.sock]
 The agent that signs with vault keys
 .TP
-\fB\-\-mount\fR \fI<MOUNT>\fR [default: /run/sshvault]
+\fB\-\-mount\fR \fI<MOUNT>\fR [default: /run/pidvault]
 Where the daemon mounts; each of your vaults is a directory inside it
 .TP
 \fB\-h\fR, \fB\-\-help\fR
@@ -25,40 +25,40 @@ Print help
 Print version
 .SH SUBCOMMANDS
 .TP
-sshvault\-daemon(1)
+pidvault\-daemon(1)
 Serve the vaults (started by the systemd unit)
 .TP
-sshvault\-create(1)
+pidvault\-create(1)
 Create a vault, empty or from a directory, and unlock it for the calling shell
 .TP
-sshvault\-unlock(1)
+pidvault\-unlock(1)
 Give the calling shell and its descendants access to a vault
 .TP
-sshvault\-lock(1)
+pidvault\-lock(1)
 Revoke the calling shell\*(Aqs access to a vault, or to all of them
 .TP
-sshvault\-status(1)
+pidvault\-status(1)
 Show your vaults; exit 0 if the calling shell has the vault (or any) unlocked
 .TP
-sshvault\-passwd(1)
+pidvault\-passwd(1)
 Change the passphrase of a vault
 .TP
-sshvault\-export(1)
+pidvault\-export(1)
 Write a vault, encrypted with its passphrase, to FILE (`\-` for stdout); needs the vault unlocked in the calling shell
 .TP
-sshvault\-import(1)
+pidvault\-import(1)
 Make an exported vault yours and unlock it for the calling shell: on a new machine, or replacing one (which needs it unlocked, and is kept as a backup)
 .TP
-sshvault\-add\-key(1)
+pidvault\-add\-key(1)
 Copy a private key into a vault, removing its passphrase on the way; the vault must be unlocked in the calling shell
 .TP
-sshvault\-stub(1)
+pidvault\-stub(1)
 Print the lines to put at the top of ~/.ssh/config
 .TP
-sshvault\-shell\-init(1)
-Print bash code that marks shells with a vault unlocked, in the prompt and the terminal title; use it with `eval "$(sshvault shell\-init)"` in ~/.bashrc
+pidvault\-shell\-init(1)
+Print bash code that marks shells with a vault unlocked, in the prompt and the terminal title; use it with `eval "$(pidvault shell\-init)"` in ~/.bashrc
 .TP
-sshvault\-help(1)
+pidvault\-help(1)
 Print this message or the help of the given subcommand(s)
 .SH VERSION
 v0.3.1

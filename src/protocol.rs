@@ -11,7 +11,7 @@ use crate::{procs, users};
 
 /// Lets the client talk to a daemon running as the client's own user. Such a daemon
 /// cannot be told apart from an impostor, so this exists for tests only.
-pub const ALLOW_SAME_UID_ENV: &str = "SSHVAULT_INSECURE_ALLOW_SAME_UID_DAEMON";
+pub const ALLOW_SAME_UID_ENV: &str = "PIDVAULT_INSECURE_ALLOW_SAME_UID_DAEMON";
 
 const MAX_REQUEST: u64 = 8 * 1024 * 1024;
 
@@ -96,7 +96,7 @@ impl Response {
 
 pub fn call(socket: &Path, request: &Request) -> Result<Response> {
     let mut stream = UnixStream::connect(socket)
-        .with_context(|| format!("connecting to the sshvault daemon at {}", socket.display()))?;
+        .with_context(|| format!("connecting to the pidvault daemon at {}", socket.display()))?;
     if std::env::var_os(ALLOW_SAME_UID_ENV).is_none() {
         authenticate_daemon(socket, &stream)?;
     }

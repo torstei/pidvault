@@ -30,7 +30,7 @@ const ROOT: u64 = 1;
 
 pub const DEFAULT_VAULT: &str = "default";
 
-const VAULT_SUFFIX: &str = ".sshvault";
+const VAULT_SUFFIX: &str = ".pidvault";
 
 /// Inodes are the user's slot (12 bits), the vault's index (8 bits), the generation of
 /// that vault's tree (12 bits) and the inode within the tree (32 bits). A vault's name
@@ -172,7 +172,7 @@ impl VaultState {
         match self.save() {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("sshvault: saving {}: {e:#}", self.path.display());
+                eprintln!("pidvault: saving {}: {e:#}", self.path.display());
                 false
             }
         }
@@ -203,7 +203,7 @@ pub struct UserState {
 impl UserState {
     fn new(account: Account, slot: u16, dir: PathBuf) -> UserState {
         // a vault stored before vaults had names becomes the default one
-        let unnamed = dir.join("vault.sshvault");
+        let unnamed = dir.join("vault.pidvault");
         let default = dir.join(format!("{DEFAULT_VAULT}{VAULT_SUFFIX}"));
         if unnamed.exists() && !default.exists() {
             let _ = std::fs::rename(&unnamed, &default);
@@ -266,7 +266,7 @@ impl UserState {
         check_vault_name(name)?;
         let known = self.vaults.iter().any(|v| v.name == name);
         if !known && !self.dir.join(format!("{name}{VAULT_SUFFIX}")).exists() {
-            bail!("you have no vault `{name}`; create one with `sshvault create {name}`");
+            bail!("you have no vault `{name}`; create one with `pidvault create {name}`");
         }
         self.vault_or_new(name)
     }
@@ -1100,7 +1100,7 @@ mod tests {
         }
         assert!(user.vaults.is_empty());
         assert!(user.vault_or_new("real").is_ok());
-        std::fs::write(dir.path().join("on-disk.sshvault"), b"").unwrap();
+        std::fs::write(dir.path().join("on-disk.pidvault"), b"").unwrap();
         assert!(
             user.existing_vault_mut("on-disk").is_ok(),
             "a vault on disk is found"
