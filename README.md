@@ -239,6 +239,27 @@ finds for each setting, so a `Host *` block in one vault applies to every host i
 that have it unlocked. Paths inside a vault contain its name: renaming one is not
 supported.
 
+### Ephemeral vaults
+
+For secrets you can get again by logging in, such as tokens, keep nothing on disk:
+
+```sh
+pidvault create --ephemeral bao --for 8h    # no passphrase; only this shell, for 8 hours
+export BAO_TOKEN_PATH=/run/pidvault/bao/token
+bao login -method=oidc                      # bao stores its token in the vault
+```
+
+An ephemeral vault starts empty and is held in memory only. It belongs to the shell that
+created it and what that shell starts: no other shell can unlock it, since there is no
+passphrase to prove it is you, and it cannot be exported. It is gone when that shell
+exits or locks it, when `--for` runs out, or when the daemon stops. Keys in it sign
+through the agent like any other, which suits short-lived SSH certificates.
+
+A secret in a vault is safe from your other processes only while programs read it from
+the vault themselves, as bao does here. A program that hands it on, through a pipe, a
+helper program or an environment variable, gives it away: any of your processes can
+read another's pipes and environment through `/proc`.
+
 ### Backups and moving to another machine
 
 ```sh

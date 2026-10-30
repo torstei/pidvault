@@ -68,8 +68,16 @@ enum Command {
     MountHelper,
     /// Create a vault, empty or from a directory, and unlock it for the calling shell
     Create {
-        #[arg(default_value = fs::DEFAULT_VAULT)]
-        vault: String,
+        /// The vault's name; `default` if left out, except for an ephemeral vault
+        #[arg(required_if_eq("ephemeral", "true"))]
+        vault: Option<String>,
+        /// Keep the vault in memory only, without a passphrase, for the calling shell and
+        /// what it starts; it is gone once locked, when the shell exits or the daemon stops
+        #[arg(long, conflicts_with_all = ["from", "no_unlock", "passphrase_stdin"])]
+        ephemeral: bool,
+        /// With --ephemeral: end it by itself after this long, e.g. 90s, 10m, 1h30m
+        #[arg(long = "for", value_parser = parse_duration, requires = "ephemeral")]
+        for_: Option<Duration>,
         /// Start from the files in this directory instead of an empty vault
         #[arg(long)]
         from: Option<PathBuf>,
@@ -198,11 +206,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Create {
             vault,
+            ephemeral,
+            for_,
             from,
             no_unlock,
             passphrase_stdin,
             work_factor,
         } => {
+            let vault = vault.unwrap_or_else(|| fs::DEFAULT_VAULT.to_owned());
             fs::check_vault_name(&vault)?;
             let status = protocol::call(&cli.socket, &Request::Status)?;
             if status.vault(&vault).is_some() {
@@ -212,6 +223,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             if !no_unlock {
                 procs::check_tracing_restricted()?;
+            }
+            if ephemeral {
+                report(protocol::call(
+                    &cli.socket,
+                    &Request::CreateEphemeral {
+                        vault: vault.clone(),
+                        for_secs: for_.map(|d| d.as_secs()),
+                    },
+                )?)?;
+                println!(
+                    "\nWhat you put in {} stays in memory only. It is gone when this shell \
+                     exits or locks it, or the daemon stops.",
+                    cli.mount.join(&vault).display()
+                );
+                return Ok(ExitCode::SUCCESS);
             }
             let passphrase = if passphrase_stdin {
                 passphrase_from_stdin()?
@@ -535,7 +561,18 @@ fn print_status(reply: &Response) {
         println!("no vault yet; create one with `pidvault create`");
     }
     for vault in &reply.vaults {
+        if vault.ephemeral && vault.unlocked_by.is_none() {
+            continue;
+        }
         match vault.unlocked_by {
+            Some(shell) if vault.ephemeral => println!(
+                "{}: ephemeral, of shell {shell}{}",
+                vault.name,
+                vault
+                    .expires_in
+                    .map(|secs| format!(" for another {}", daemon::format_duration(secs)))
+                    .unwrap_or_default(),
+            ),
             Some(shell) => println!(
                 "{}: unlocked by shell {shell}{} ({} of your shells have it unlocked)",
                 vault.name,

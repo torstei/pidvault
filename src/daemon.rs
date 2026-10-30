@@ -365,6 +365,9 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 contents: key.seal_tree(&tree)?,
             };
             with_new_vault(ctx, &peer, &name, |vault, room| {
+                if vault.ephemeral {
+                    bail!("`{name}` is an ephemeral vault; lock it before using its name");
+                }
                 let replacing = vault.exists();
                 if replacing && vault.unlocked_ancestor(peer.pid).is_none() {
                     bail!("replacing `{name}` {}", needs_unlock(&name));
@@ -394,6 +397,9 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             passphrase,
         } => {
             let wrapped_key = with_vault(ctx, &peer, &name, |vault, _| {
+                if vault.ephemeral {
+                    bail!("`{name}` is ephemeral: it has no passphrase and cannot be exported");
+                }
                 match (&vault.open, vault.unlocked_ancestor(peer.pid)) {
                     (Some(open), Some(_)) => Ok(open.wrapped_key.clone()),
                     _ => bail!("export {}", needs_unlock(&name)),
@@ -419,6 +425,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
         } => {
             vault::check_new_passphrase(&new)?;
             let wrapped_key = with_vault(ctx, &peer, &name, |vault, _| match &vault.open {
+                _ if vault.ephemeral => bail!("`{name}` is ephemeral and has no passphrase"),
                 Some(open) => Ok(open.wrapped_key.clone()),
                 None => Ok(Stored::read(&vault.path)
                     .with_context(|| format!("you have no vault `{name}`"))?
@@ -447,6 +454,27 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 Ok(format!("passphrase of `{name}` changed"))
             })?
         }
+        Request::CreateEphemeral {
+            vault: name,
+            for_secs,
+        } => {
+            let expires = for_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
+            let (shell, handle) = calling_shell(&peer)?;
+            let key = Key::generate()?;
+            let mut state = fs::lock(&ctx.state);
+            let user = state
+                .user_mut(peer.uid)
+                .context("caller has no passwd entry")?;
+            let room = user.room_for(&name);
+            let vault = user.new_ephemeral(&name)?;
+            vault.hold(Unlocked::new(Tree::empty(), key, Vec::new()), room)?;
+            vault.sessions.register(shell, handle, expires);
+            let until = match for_secs {
+                Some(secs) => format!(" for {}", format_duration(secs)),
+                None => String::new(),
+            };
+            format!("ephemeral vault `{name}` created for shell {shell}{until}")
+        }
         Request::Unlock {
             vault: name,
             passphrase,
@@ -455,7 +483,15 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             let expires = for_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
             fs::check_vault_name(&name)?;
             let (shell, handle) = calling_shell(&peer)?;
-            let path = with_vault(ctx, &peer, &name, |vault, _| Ok(vault.path.clone()))?;
+            let path = with_vault(ctx, &peer, &name, |vault, _| {
+                if vault.ephemeral {
+                    bail!(
+                        "`{name}` is ephemeral: only the shell that created it, and what that \
+                         shell starts, can use it"
+                    );
+                }
+                Ok(vault.path.clone())
+            })?;
             if !path.exists() {
                 bail!("you have no vault `{name}`; create one with `pidvault create {name}`");
             }
@@ -534,6 +570,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                         .and_then(|shell| v.sessions.expires(shell))
                         .map(|at| at.saturating_duration_since(Instant::now()).as_secs()),
                     sessions: v.sessions.len(),
+                    ephemeral: v.ephemeral,
                     notes: v
                         .open
                         .as_ref()

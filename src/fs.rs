@@ -105,6 +105,8 @@ pub struct VaultState {
     index: u8,
     generation: u16,
     pub path: PathBuf,
+    /// Held in memory only, by the shell that created it, and gone once no shell has it.
+    pub ephemeral: bool,
     pub open: Option<Unlocked>,
     pub sessions: Sessions<Pidfd>,
 }
@@ -121,7 +123,11 @@ impl VaultState {
     }
 
     pub fn exists(&self) -> bool {
-        self.path.exists()
+        if self.ephemeral {
+            self.open.is_some()
+        } else {
+            self.path.exists()
+        }
     }
 
     /// Replaces what is held in memory, if it fits in `room` (from `UserState::room_for`);
@@ -144,6 +150,9 @@ impl VaultState {
     }
 
     pub fn save(&mut self) -> Result<()> {
+        if self.ephemeral {
+            return Ok(());
+        }
         let Some(open) = &mut self.open else {
             return Ok(());
         };
@@ -272,11 +281,25 @@ impl UserState {
     }
 
     /// The vault called `name`, known from now on whether or not it exists yet; for
-    /// creating one.
+    /// creating one. The place of an ephemeral vault that is gone is reused, so making
+    /// them up does not use up the user's 255 places.
     pub fn vault_or_new(&mut self, name: &str) -> Result<&mut VaultState> {
         check_vault_name(name)?;
+        let path = self.dir.join(format!("{name}{VAULT_SUFFIX}"));
+        let gone = |v: &VaultState| v.ephemeral && v.open.is_none() && v.sessions.is_empty();
         if let Some(i) = self.vaults.iter().position(|v| v.name == name) {
-            return Ok(&mut self.vaults[i]);
+            let vault = &mut self.vaults[i];
+            if gone(vault) {
+                vault.ephemeral = false;
+            }
+            return Ok(vault);
+        }
+        if let Some(i) = self.vaults.iter().position(gone) {
+            let vault = &mut self.vaults[i];
+            vault.name = name.to_owned();
+            vault.path = path;
+            vault.ephemeral = false;
+            return Ok(vault);
         }
         let Ok(index) = u8::try_from(self.vaults.len() + 1) else {
             bail!("too many vaults");
@@ -285,11 +308,26 @@ impl UserState {
             name: name.to_owned(),
             index,
             generation: 1,
-            path: self.dir.join(format!("{name}{VAULT_SUFFIX}")),
+            path,
+            ephemeral: false,
             open: None,
             sessions: Sessions::new(),
         });
         Ok(self.vaults.last_mut().expect("just pushed"))
+    }
+
+    /// A new ephemeral vault called `name`, for the caller to fill and register a shell
+    /// with; refused if the user has any vault of that name.
+    pub fn new_ephemeral(&mut self, name: &str) -> Result<&mut VaultState> {
+        check_vault_name(name)?;
+        let taken = self.vault(name).is_some_and(VaultState::exists)
+            || self.dir.join(format!("{name}{VAULT_SUFFIX}")).exists();
+        if taken {
+            bail!("you already have a vault `{name}`");
+        }
+        let vault = self.vault_or_new(name)?;
+        vault.ephemeral = true;
+        Ok(vault)
     }
 
     fn by_index(&self, index: u8) -> Option<&VaultState> {
@@ -1105,6 +1143,28 @@ mod tests {
             user.existing_vault_mut("on-disk").is_ok(),
             "a vault on disk is found"
         );
+    }
+
+    /// Ephemeral vaults come and go under any name; one that is gone leaves its place to
+    /// the next vault, so they cannot use up a user's 255 places either.
+    #[test]
+    fn ephemeral_vaults_that_are_gone_take_no_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut user = user_in(dir.path());
+        for i in 0..1000 {
+            let vault = user.new_ephemeral(&format!("passing-{i}")).unwrap();
+            vault
+                .hold(
+                    Unlocked::new(Tree::empty(), Key::generate().unwrap(), Vec::new()),
+                    MAX_SECRET,
+                )
+                .unwrap();
+            vault.open = None;
+        }
+        assert_eq!(user.vaults.len(), 1);
+        let reused = user.vault_or_new("real").unwrap();
+        assert!(!reused.ephemeral);
+        assert_eq!(reused.path, dir.path().join("real.pidvault"));
     }
 
     /// One user's unlocked vaults share MAX_HELD_PER_USER, so no user can take the
