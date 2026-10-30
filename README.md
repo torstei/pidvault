@@ -180,7 +180,7 @@ eval "$(pidvault shell-init)"
 ```
 
 While a shell has a vault unlocked, its prompt starts with a red marker naming the vault
-and the time left, e.g. ` 🔑 default 9m `, and the terminal title starts with the same.
+and the time left, e.g. ` 🔑 stored/default 9m `, and the terminal title starts with the same.
 Both go away at the next prompt once the vault is locked or runs out. The marker is a
 reminder, not a safeguard: any process of yours can print one. It is for bash; the rest
 of your prompt stays as it was.

@@ -256,7 +256,10 @@ fn access_ends_when_the_shell_exits() {
     assert!(f.unlocked_shell("true").status.success());
     let o = f.command(BIN).arg("status").output().unwrap();
     assert_eq!(o.status.code(), Some(1));
-    assert!(stdout(&o).starts_with("default: locked here (0 "), "{o:?}");
+    assert!(
+        stdout(&o).starts_with("stored/default: locked here (0 "),
+        "{o:?}"
+    );
 }
 
 #[test]
@@ -729,7 +732,7 @@ fn lock_can_lock_one_vault() {
     );
     let out = stdout(&o);
     assert!(out.starts_with(CONFIG), "{o:?}");
-    assert!(out.contains("default: unlocked by shell"), "{o:?}");
+    assert!(out.contains("stored/default: unlocked by shell"), "{o:?}");
     assert!(out.contains("work: locked here"), "{o:?}");
 }
 
@@ -1029,7 +1032,10 @@ fn create_with_no_unlock_leaves_the_shell_locked() {
         "echo '{PASSPHRASE}' | \"$SV\" create --no-unlock --passphrase-stdin --work-factor 10 >/dev/null && \"$SV\" status"
     ));
     assert_eq!(o.status.code(), Some(1), "{o:?}");
-    assert!(stdout(&o).starts_with("default: locked here"), "{o:?}");
+    assert!(
+        stdout(&o).starts_with("stored/default: locked here"),
+        "{o:?}"
+    );
 }
 
 /// New passphrases need 15 characters, whether set by create or by passwd; the passwd
@@ -1059,7 +1065,10 @@ fn status_right_after_a_restart_lists_the_vaults() {
     };
     f.restart_daemon();
     let o = f.command(BIN).arg("status").output().unwrap();
-    assert!(stdout(&o).starts_with("default: locked here"), "{o:?}");
+    assert!(
+        stdout(&o).starts_with("stored/default: locked here"),
+        "{o:?}"
+    );
 }
 
 #[test]
@@ -1329,7 +1338,7 @@ fn an_unlock_for_a_while_ends_by_itself() {
         "{o:?}"
     );
     assert!(
-        out.ends_with("default: locked here (0 of your other shells have it unlocked)\n"),
+        out.ends_with("stored/default: locked here (0 of your other shells have it unlocked)\n"),
         "{o:?}"
     );
 }
@@ -1359,8 +1368,7 @@ fn the_prompt_marks_a_shell_while_it_has_a_vault_unlocked() {
         ])
         .output()
         .unwrap();
-    let marked =
-        r"\[\e[1;97;41m\] 🔑 default 10m \[\e[0m\] $ \[\e]2;🔑 default 10m — \u@\h: \w\a\]";
+    let marked = r"\[\e[1;97;41m\] 🔑 stored/default 10m \[\e[0m\] $ \[\e]2;🔑 stored/default 10m — \u@\h: \w\a\]";
     let out = stdout(&o);
     assert!(
         out.starts_with(&format!("$ \nstatus 3\n{marked}\n\x1b]2;")),
@@ -1376,9 +1384,9 @@ fn status_for_a_prompt_names_only_the_vaults_this_shell_unlocked() {
     };
     create_named(&f, "work", "Host w\n");
     let both = shell_with(&f, &["default", "work"], "\"$SV\" status --prompt");
-    assert_eq!(stdout(&both), "default, work\n", "{both:?}");
+    assert_eq!(stdout(&both), "stored/default, stored/work\n", "{both:?}");
     let one = shell_with(&f, &["work"], "\"$SV\" status --prompt");
-    assert_eq!(stdout(&one), "work\n", "{one:?}");
+    assert_eq!(stdout(&one), "stored/work\n", "{one:?}");
     let none = f
         .command(BIN)
         .args(["status", "--prompt"])
@@ -1415,7 +1423,7 @@ fn requests_for_made_up_vaults_cannot_use_up_a_users_places() {
            "$SV" status"#
     ));
     assert!(
-        stdout(&o).starts_with("1\nreal: unlocked by shell"),
+        stdout(&o).starts_with("1\nstored/real: unlocked by shell"),
         "{o:?}"
     );
     assert_eq!(
@@ -1447,7 +1455,7 @@ fn an_ephemeral_vault_belongs_to_its_shell_and_is_never_stored() {
     assert!(out.starts_with("token\n"), "{out}");
     assert!(out.contains("\nephemeral/bao: of shell "), "{out}");
     assert!(out.contains(" for another 9m"), "{out}");
-    assert!(out.contains("\ndefault: locked here"), "{out}");
+    assert!(out.contains("\nstored/default: locked here"), "{out}");
     assert!(!out.contains("bao.pidvault"), "{out}");
 
     let after = f.outsider("cat \"$PIDVAULT_MOUNT/ephemeral/bao/token\"; \"$SV\" status");
@@ -1481,7 +1489,7 @@ fn ephemeral_and_stored_vaults_are_apart() {
     assert!(out.starts_with("mine\n"), "{o:?}");
     assert!(!out.contains("unlocked\n") && !out.contains("exported") && !out.contains("twice"));
     assert!(!out.contains("leaked"), "{o:?}");
-    assert!(out.contains("\ndefault: locked here"), "{out}");
+    assert!(out.contains("\nstored/default: locked here"), "{out}");
     assert!(out.contains("\nephemeral/default: of shell "), "{out}");
     let err = stderr_of(&o);
     for expected in [
