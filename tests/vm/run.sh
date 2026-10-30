@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds the .deb and runs each guest script as root in a throwaway Ubuntu VM of its own, in
-# parallel: guest-tests.sh installs the package fresh, guest-upgrade.sh moves to it from the
-# last release of sshvault, its name before.
+# parallel: guest-tests.sh installs the package fresh, guest-upgrade.sh upgrades to it from
+# the latest published release.
 # Needs read/write access to /dev/kvm, qemu-system-x86_64, qemu-img, genisoimage, gpg, gpgv,
 # apt-ftparchive, curl and cargo-deb. No sudo. The verified cloud image is cached; every run
 # boots fresh overlays.
@@ -19,8 +19,6 @@ KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/pidvault-vm"
 TIMEOUT="${PIDVAULT_VM_TIMEOUT:-600}"
 VMS=(guest-tests guest-upgrade)
-PREVIOUS_URL=https://github.com/torstei/sshvault/releases/download/v0.3.1/sshvault_0.3.1-1_amd64.deb
-PREVIOUS_SHA256=49b5226a6db9ab39d14ec4eee18a62b7010529afb3589b548ec387022cdf99b0
 
 fetch_image() {
     mkdir -p "$CACHE"
@@ -42,18 +40,9 @@ fetch_image() {
     touch "$CACHE/$IMAGE.verified"
 }
 
-fetch_previous() {
-    local deb="$CACHE/$PREVIOUS_SHA256.deb"
-    if [[ ! -f "$deb" ]]; then
-        curl -fsSL -o "$deb.part" "$PREVIOUS_URL"
-        echo "$PREVIOUS_SHA256  $deb.part" | sha256sum --check --quiet
-        mv "$deb.part" "$deb"
-    fi
-    cp "$deb" "$WORK/seed/previous.deb"
-}
-
 fetch_image
-DEB=$(cargo deb --quiet 2>/dev/null | tail -1)
+# a revision above the published one's, so installing it over that release is an upgrade
+DEB=$(cargo deb --quiet --deb-revision 1+test 2>/dev/null | tail -1)
 [[ -f "$DEB" ]] || { echo "cargo deb did not produce a package" >&2; exit 1; }
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/pidvault-vm.XXXXXX")
@@ -79,7 +68,7 @@ done
 mkdir "$WORK/debs" && cp "$DEB" "$WORK/debs/"
 scripts/build-apt-repo.sh "$WORK/debs" "$WORK/seed/repo" "pidvault test" >/dev/null
 gpg --armor --export "someone else" > "$WORK/seed/other.asc"
-fetch_previous
+cp packaging/pidvault-apt.asc "$WORK/seed/published.asc"
 cp tests/vm/lib.sh "$WORK/seed/"
 printf 'instance-id: pidvault-test\nlocal-hostname: pidvault-test\n' > "$WORK/seed/meta-data"
 
