@@ -595,7 +595,7 @@ fn print_status(reply: &Response) {
             ),
             Some(shell) => println!(
                 "{}: unlocked by shell {shell}{} ({} of your shells have it unlocked)",
-                vault.name,
+                shown_name(vault),
                 vault
                     .expires_in
                     .map(|secs| format!(" for another {}", daemon::format_duration(secs)))
@@ -604,7 +604,8 @@ fn print_status(reply: &Response) {
             ),
             None => println!(
                 "{}: locked here ({} of your other shells have it unlocked)",
-                vault.name, vault.sessions
+                shown_name(vault),
+                vault.sessions
             ),
         }
         for note in &vault.notes {
@@ -613,17 +614,19 @@ fn print_status(reply: &Response) {
     }
 }
 
-/// A vault as the user names it: stored ones by name, ephemeral ones as `ephemeral/NAME`.
+/// A vault with the directory of its kind, `stored/NAME` or `ephemeral/NAME`, as it
+/// appears under the mount.
 fn shown_name(vault: &VaultStatus) -> String {
-    if vault.ephemeral {
-        format!("{}/{}", fs::EPHEMERAL, vault.name)
+    let kind = if vault.ephemeral {
+        fs::EPHEMERAL
     } else {
-        vault.name.clone()
-    }
+        fs::STORED
+    };
+    format!("{kind}/{}", vault.name)
 }
 
 /// The vaults the calling shell has unlocked, each with the time it has left, e.g.
-/// `default 9m, work, ephemeral/bao 2h`; with `only`, just that vault.
+/// `stored/default 9m, stored/work, ephemeral/bao 2h`; with `only`, just that vault.
 fn prompt_line(reply: &Response, only: Option<(bool, &str)>) -> String {
     reply
         .vaults

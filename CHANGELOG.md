@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `status` and the prompt marker name stored vaults as `stored/NAME`, as they appear
+  under the mount, beside `ephemeral/NAME`.
+
 ## 0.5.0 - 2026-10-30
 
 - Stored vaults moved from `/run/pidvault/NAME` to `/run/pidvault/stored/NAME`, beside
