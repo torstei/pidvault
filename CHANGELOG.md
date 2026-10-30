@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-30
 
 - sshvault is now pidvault: the package, the command, the service account, `/run/pidvault`,
   `/var/lib/pidvault`, the `PIDVAULT_*` variables and the apt repository, now at
@@ -9,6 +9,11 @@
 - `eval "$(pidvault shell-init)"` in `~/.bashrc` marks shells that have a vault
   unlocked: a red marker before the prompt and the vault names in the terminal title,
   with the time left after `unlock --for`. `pidvault status --prompt` prints just that.
+- The security design lists a new known limitation: any of your processes can read your
+  pipes and terminals through `/proc`, so a piped or typed passphrase, or a secret a
+  program passes on through a pipe, can be taken. Vault files cannot be reopened that way.
+- crypto-bigint, under the ECDSA signatures, is updated to 0.7.10, with fixes for edge
+  cases in modular inversion and multiplication.
 
 ## 0.3.1 - 2026-10-24
 
