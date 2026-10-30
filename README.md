@@ -29,7 +29,7 @@ None of this is a bug. On Unix, the boundary is the user id, and everything you 
 ## What pidvault does instead
 
 Access is granted per shell, not per login. A shell that has run `pidvault unlock`, and
-every process it starts, sees your decrypted `config` under `/run/pidvault/default/` and
+every process it starts, sees your decrypted `config` under `/run/pidvault/stored/default/` and
 can sign with the keys stored there — through pidvault's own agent, which answers only
 processes of unlocked shells. The keys themselves cannot be read, not even from an
 unlocked shell, so nothing running there can take them along. Every other process running
@@ -101,17 +101,28 @@ sshvault block at the top of `~/.ssh/config` with the output of `pidvault stub`,
 a shell with every vault unlocked:
 
 ```sh
-sed -i 's|/run/sshvault|/run/pidvault|g' /run/pidvault/*/config
+sed -i -e 's|/run/sshvault/|/run/pidvault/stored/|g' -e 's|/run/sshvault-agent|/run/pidvault-agent|g' \
+  /run/pidvault/stored/*/config
 ```
 
 The `sshvault` account stays behind, unused; `sudo userdel sshvault` removes it.
+
+### Upgrading from 0.4
+
+Stored vaults moved from `/run/pidvault/NAME` to `/run/pidvault/stored/NAME`, beside
+`/run/pidvault/ephemeral`. Replace the block at the top of `~/.ssh/config` with the output
+of `pidvault stub`, then, in a shell with every vault unlocked:
+
+```sh
+sed -i -E 's#/run/pidvault/(stored/)?#/run/pidvault/stored/#g' /run/pidvault/stored/*/config
+```
 
 ## How it is meant to be used
 
 ```sh
 sudo apt install pidvault                   # once per machine; see Installing
 pidvault create                             # once: asks for a passphrase, unlocks this shell
-$EDITOR /run/pidvault/default/config        # starts as a commented example
+$EDITOR /run/pidvault/stored/default/config        # starts as a commented example
 pidvault stub                               # once: put its output at the top of ~/.ssh/config
 pidvault unlock                             # in each further shell that should have access
 ```
@@ -120,7 +131,7 @@ pidvault unlock                             # in each further shell that should 
 `pidvault create --from DIR` starts from the files in a directory instead of an empty
 vault. Keys you copy in from `~/.ssh` have been readable by every process you ran so far:
 the clean move is to generate new ones straight into the vault, e.g.
-`ssh-keygen -t ed25519 -N '' -f /run/pidvault/default/id_ed25519`, and retire the old ones.
+`ssh-keygen -t ed25519 -N '' -f /run/pidvault/stored/default/id_ed25519`, and retire the old ones.
 
 `pidvault stub` prints a block that must sit at the top of `~/.ssh/config`:
 
@@ -128,7 +139,7 @@ the clean move is to generate new ones straight into the vault, e.g.
 Match exec "/usr/bin/pidvault status --quiet"
     IdentityAgent /run/pidvault-agent.sock
     AddKeysToAgent no
-    Include /run/pidvault/*/config
+    Include /run/pidvault/stored/*/config /run/pidvault/ephemeral/*/config
 ```
 
 In a shell with a vault unlocked, the vaults' entries take precedence and ssh signs
@@ -140,7 +151,7 @@ your desktop agent, so a key you still keep there works only in other shells unt
 move it into a vault.
 
 If that block is more magic than you want in `~/.ssh/config`, leave it out and name the
-vault's config yourself: `ssh -F /run/pidvault/default/config HOST`. A new vault's
+vault's config yourself: `ssh -F /run/pidvault/stored/default/config HOST`. A new vault's
 starter `config` already points ssh at the vault agent, so nothing else is needed. `-F`
 replaces `~/.ssh/config` and `/etc/ssh/ssh_config` rather than adding to them; jump hosts
 work with `ProxyJump`, which passes `-F` on, but not with a `ProxyCommand` running
@@ -152,8 +163,8 @@ editors, `sed -i`, `ssh-keygen` and `ssh` itself all work. Changes are saved on 
 when a written file is closed, on a rename, and otherwise within a second.
 
 Inside the vault, refer to files through the mount, e.g.
-`IdentityFile /run/pidvault/default/id_ed25519` (with its `.pub` beside it) and
-`UserKnownHostsFile /run/pidvault/default/known_hosts`. Keep `ControlPath` elsewhere
+`IdentityFile /run/pidvault/stored/default/id_ed25519` (with its `.pub` beside it) and
+`UserKnownHostsFile /run/pidvault/stored/default/known_hosts`. Keep `ControlPath` elsewhere
 (`$XDG_RUNTIME_DIR`): unix sockets cannot live on the mount. A vault holds up to 4 MiB.
 
 `pidvault unlock --for 30m` makes any unlock end by itself; `status` shows how long is
@@ -216,7 +227,7 @@ agent to. On those, the vault agent offers no key unless the vault's `agent.toml
 it, so remote root cannot sign with your keys even where `ForwardAgent yes` is set:
 
 ```toml
-# /run/pidvault/default/agent.toml
+# /run/pidvault/stored/default/agent.toml
 [keys."id_jump"]          # the key's path in the vault
 forward = true            # may sign through hosts this agent is forwarded to
 ```
@@ -229,7 +240,7 @@ Older ssh versions do not mark forwarded connections; with those, everything loo
 ```sh
 pidvault create prod                        # its own key, and its own passphrase if you like
 pidvault unlock prod                        # in the shell that should have it
-$EDITOR /run/pidvault/prod/config
+$EDITOR /run/pidvault/stored/prod/config
 pidvault lock prod                          # lock just that one
 ```
 
@@ -245,16 +256,18 @@ For secrets you can get again by logging in, such as tokens, keep nothing on dis
 
 ```sh
 pidvault create --ephemeral bao --for 8h    # no passphrase; only this shell, for 8 hours
-export BAO_TOKEN_PATH=/run/pidvault/bao/token
+export BAO_TOKEN_PATH=/run/pidvault/ephemeral/bao/token
 bao login -method=oidc                      # bao stores its token in the vault
 ```
 
-An ephemeral vault starts empty and is held in memory only. It belongs to the shell that
-created it and what that shell starts: no other shell sees it or can unlock it, since
-there is no passphrase to prove it is you, and it cannot be exported. Its name is the
-shell's own, so every shell can have its own `bao` at the same path, and
-`BAO_TOKEN_PATH` can be set once in `~/.bashrc`; in a shell without one, bao finds no
-token. It is gone when that shell exits or locks it, when `--for` runs out, or when the
+An ephemeral vault starts empty and is held in memory only, under
+`/run/pidvault/ephemeral`, apart from the stored vaults under `/run/pidvault/stored`. It
+belongs to the shell that created it and what that shell starts: no other shell sees it
+or can unlock it, since there is no passphrase to prove it is you, and it cannot be
+exported. Its name is the shell's own, so every shell can have its own `bao` at the same
+path, and `BAO_TOKEN_PATH` can be set once in `~/.bashrc`; in a shell without one, bao
+finds no token. `status` shows it as `ephemeral/bao`, and `pidvault lock --ephemeral bao`
+ends it. It is gone when that shell exits or locks it, when `--for` runs out, or when the
 daemon stops. Keys in it sign through the agent like any other, which suits short-lived
 SSH certificates.
 

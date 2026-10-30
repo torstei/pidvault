@@ -303,8 +303,8 @@ fn with_vault<T>(
     let user = state
         .user_mut(peer.uid)
         .context("caller has no passwd entry")?;
-    let room = user.room_for(name, peer.pid);
-    f(user.existing_vault_mut(name, peer.pid)?, room)
+    let room = user.room_for(name);
+    f(user.existing_vault_mut(name)?, room)
 }
 
 /// As `with_vault`, but also for a vault that is about to be created.
@@ -318,10 +318,7 @@ fn with_new_vault<T>(
     let user = state
         .user_mut(peer.uid)
         .context("caller has no passwd entry")?;
-    if user.vault_for(name, peer.pid).is_some_and(|v| v.ephemeral) {
-        bail!("this shell has an ephemeral vault `{name}`; lock it first");
-    }
-    let room = user.room_for(name, peer.pid);
+    let room = user.room_for(name);
     f(user.vault_or_new(name)?, room)
 }
 
@@ -397,9 +394,6 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             passphrase,
         } => {
             let wrapped_key = with_vault(ctx, &peer, &name, |vault, _| {
-                if vault.ephemeral {
-                    bail!("`{name}` is ephemeral: it has no passphrase and cannot be exported");
-                }
                 match (&vault.open, vault.unlocked_ancestor(peer.pid)) {
                     (Some(open), Some(_)) => Ok(open.wrapped_key.clone()),
                     _ => bail!("export {}", needs_unlock(&name)),
@@ -425,7 +419,6 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
         } => {
             vault::check_new_passphrase(&new)?;
             let wrapped_key = with_vault(ctx, &peer, &name, |vault, _| match &vault.open {
-                _ if vault.ephemeral => bail!("`{name}` is ephemeral and has no passphrase"),
                 Some(open) => Ok(open.wrapped_key.clone()),
                 None => Ok(Stored::read(&vault.path)
                     .with_context(|| format!("you have no vault `{name}`"))?
@@ -483,15 +476,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             let expires = for_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
             fs::check_vault_name(&name)?;
             let (shell, handle) = calling_shell(&peer)?;
-            let path = with_vault(ctx, &peer, &name, |vault, _| {
-                if vault.ephemeral {
-                    bail!(
-                        "`{name}` is ephemeral: only the shell that created it, and what that \
-                         shell starts, can use it"
-                    );
-                }
-                Ok(vault.path.clone())
-            })?;
+            let path = with_vault(ctx, &peer, &name, |vault, _| Ok(vault.path.clone()))?;
             if !path.exists() {
                 bail!("you have no vault `{name}`; create one with `pidvault create {name}`");
             }
@@ -525,14 +510,21 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 ))
             })?
         }
-        Request::Lock { vault: name, all } => {
+        Request::Lock {
+            vault: name,
+            all,
+            ephemeral,
+        } => {
             let mut state = fs::lock(&ctx.state);
             let user = state
                 .user_mut(peer.uid)
                 .context("caller has no passwd entry")?;
             let mut locked = Vec::new();
             for vault in user.vaults_mut() {
-                if name.as_ref().is_some_and(|n| *n != vault.name) {
+                if name
+                    .as_ref()
+                    .is_some_and(|n| *n != vault.name || vault.ephemeral != ephemeral)
+                {
                     continue;
                 }
                 if all {

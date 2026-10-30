@@ -55,11 +55,13 @@ pub enum Request {
         #[serde(default)]
         for_secs: Option<u64>,
     },
-    /// Locks `vault`, or every vault, for the caller's shell; with `all`, for every
-    /// shell of the caller's user.
+    /// Locks `vault`, stored or with `ephemeral` the shell's ephemeral one, or every
+    /// vault, for the caller's shell; with `all`, for every shell of the caller's user.
     Lock {
         vault: Option<String>,
         all: bool,
+        #[serde(default)]
+        ephemeral: bool,
     },
     Status,
 }
@@ -95,8 +97,15 @@ pub struct Response {
 }
 
 impl Response {
+    /// The stored vault `name`.
     pub fn vault(&self, name: &str) -> Option<&VaultStatus> {
-        self.vaults.iter().find(|v| v.name == name)
+        self.vault_in(false, name)
+    }
+
+    pub fn vault_in(&self, ephemeral: bool, name: &str) -> Option<&VaultStatus> {
+        self.vaults
+            .iter()
+            .find(|v| v.ephemeral == ephemeral && v.name == name)
     }
 
     pub fn any_unlocked(&self) -> bool {

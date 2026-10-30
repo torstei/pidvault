@@ -116,7 +116,7 @@ impl Fixture {
 
     /// The current user's directory inside the mount.
     fn mnt(&self) -> PathBuf {
-        self.path("mnt/default")
+        self.path("mnt/stored/default")
     }
 
     fn command(&self, program: &str) -> Command {
@@ -239,7 +239,7 @@ fn outsider_is_refused_while_a_shell_is_unlocked() {
     shell.wait().unwrap();
 
     assert!(
-        stdout(&open_file).contains("/mnt/default/config"),
+        stdout(&open_file).contains("/mnt/stored/default/config"),
         "{open_file:?}"
     );
     for attempt in [direct, via_proc_root, via_proc_cwd, via_open_file] {
@@ -645,17 +645,21 @@ fn the_mount_lists_only_the_callers_vaults_which_belong_to_the_caller() {
     let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
         return;
     };
-    let o = f.outsider("ls -A \"$PIDVAULT_MOUNT\"; stat -c '%A %U' \"$MNT\" \"$PIDVAULT_MOUNT\"");
+    let o = f.outsider(
+        "ls -A \"$PIDVAULT_MOUNT\" \"$PIDVAULT_MOUNT/stored\" \"$PIDVAULT_MOUNT/ephemeral\"; \
+         stat -c '%A %U' \"$MNT\" \"$PIDVAULT_MOUNT\" \"$PIDVAULT_MOUNT/stored\"",
+    );
+    let me = username();
     assert_eq!(
         stdout(&o),
         format!(
-            "default\ndrwx------ {}\ndrwxr-xr-x {}\n",
-            username(),
-            username()
+            "{mnt}:\nephemeral\nstored\n\n{mnt}/ephemeral:\n\n{mnt}/stored:\ndefault\n\
+             drwx------ {me}\ndrwxr-xr-x {me}\ndrwxr-xr-x {me}\n",
+            mnt = f.path("mnt").display()
         )
     );
     for name in ["work", "root", ".."] {
-        let probe = f.outsider(&format!("ls \"$PIDVAULT_MOUNT/{name}/config\""));
+        let probe = f.outsider(&format!("ls \"$PIDVAULT_MOUNT/stored/{name}/config\""));
         assert!(!probe.status.success(), "{name}: {probe:?}");
     }
 }
@@ -679,7 +683,7 @@ fn create_named(f: &Fixture, name: &str, config: &str) {
         &[],
         &format!(
             "printf '%s\\n' \"$PW\" | \"$SV\" create {name} --no-unlock --passphrase-stdin --work-factor 10 >/dev/null || exit 1\n\
-             printf '%s\\n' \"$PW\" | \"$SV\" unlock {name} --passphrase-stdin >/dev/null && printf '{config}' > \"$PIDVAULT_MOUNT/{name}/config\""
+             printf '%s\\n' \"$PW\" | \"$SV\" unlock {name} --passphrase-stdin >/dev/null && printf '{config}' > \"$PIDVAULT_MOUNT/stored/{name}/config\""
         ),
     );
     assert!(o.status.success(), "{o:?}");
@@ -691,7 +695,7 @@ fn a_shell_sees_only_the_vaults_it_unlocked() {
         return;
     };
     create_named(&f, "work", "Host w\n  User fromwork\n");
-    let read_both = "cat \"$PIDVAULT_MOUNT/default/config\" 2>/dev/null; cat \"$PIDVAULT_MOUNT/work/config\" 2>/dev/null; ls \"$PIDVAULT_MOUNT\"";
+    let read_both = "cat \"$PIDVAULT_MOUNT/stored/default/config\" 2>/dev/null; cat \"$PIDVAULT_MOUNT/stored/work/config\" 2>/dev/null; ls \"$PIDVAULT_MOUNT/stored\"";
     assert_eq!(
         stdout(&shell_with(&f, &["work"], read_both)),
         "Host w\n  User fromwork\ndefault\nwork\n"
@@ -707,7 +711,7 @@ fn a_shell_sees_only_the_vaults_it_unlocked() {
     let write_other = shell_with(
         &f,
         &["work"],
-        "echo planted >> \"$PIDVAULT_MOUNT/default/config\"",
+        "echo planted >> \"$PIDVAULT_MOUNT/stored/default/config\"",
     );
     assert!(!write_other.status.success());
 }
@@ -721,7 +725,7 @@ fn lock_can_lock_one_vault() {
     let o = shell_with(
         &f,
         &["default", "work"],
-        "\"$SV\" lock work >/dev/null; cat \"$PIDVAULT_MOUNT/work/config\" 2>/dev/null; cat \"$MNT/config\"; \"$SV\" status",
+        "\"$SV\" lock work >/dev/null; cat \"$PIDVAULT_MOUNT/stored/work/config\" 2>/dev/null; cat \"$MNT/config\"; \"$SV\" status",
     );
     let out = stdout(&o);
     assert!(out.starts_with(CONFIG), "{o:?}");
@@ -1245,7 +1249,7 @@ fn add_key_takes_an_unprotected_key_into_a_named_vault() {
         &["signing"],
         &format!(
             r#""$SV" add-key --vault signing '{}' </dev/null >/dev/null || exit 1
-               ls "$PIDVAULT_MOUNT/signing"
+               ls "$PIDVAULT_MOUNT/stored/signing"
                SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l | grep -c sign-key"#,
             original.display()
         ),
@@ -1407,7 +1411,7 @@ fn requests_for_made_up_vaults_cannot_use_up_a_users_places() {
     };
     let o = f.outsider(&format!(
         r#"for i in $(seq 300); do echo x | "$SV" unlock "made-up-$i" --passphrase-stdin 2>/dev/null; done
-           echo '{PASSPHRASE}' | "$SV" create real --passphrase-stdin --work-factor 10 | grep -c stored
+           echo '{PASSPHRASE}' | "$SV" create real --passphrase-stdin --work-factor 10 | grep -c 'vault `real` stored'
            "$SV" status"#
     ));
     assert!(
@@ -1432,8 +1436,8 @@ fn an_ephemeral_vault_belongs_to_its_shell_and_is_never_stored() {
     let state = f.path("state");
     let o = f.outsider(&format!(
         r#""$SV" create --ephemeral bao --for 10m >/dev/null || exit 99
-        printf token > "$PIDVAULT_MOUNT/bao/token"
-        sh -c 'cat "$PIDVAULT_MOUNT/bao/token"' && echo
+        printf token > "$PIDVAULT_MOUNT/ephemeral/bao/token"
+        sh -c 'cat "$PIDVAULT_MOUNT/ephemeral/bao/token"' && echo
         "$SV" status
         ls -A '{}'/*"#,
         state.display()
@@ -1441,22 +1445,22 @@ fn an_ephemeral_vault_belongs_to_its_shell_and_is_never_stored() {
     assert!(o.status.success(), "{o:?}");
     let out = stdout(&o);
     assert!(out.starts_with("token\n"), "{out}");
-    assert!(out.contains("\nbao: ephemeral, of shell "), "{out}");
+    assert!(out.contains("\nephemeral/bao: of shell "), "{out}");
     assert!(out.contains(" for another 9m"), "{out}");
     assert!(out.contains("\ndefault: locked here"), "{out}");
     assert!(!out.contains("bao.pidvault"), "{out}");
 
-    let after = f.outsider("cat \"$PIDVAULT_MOUNT/bao/token\"; \"$SV\" status");
+    let after = f.outsider("cat \"$PIDVAULT_MOUNT/ephemeral/bao/token\"; \"$SV\" status");
     assert!(!stdout(&after).contains("token"), "{after:?}");
     assert!(!stdout(&after).contains("bao"), "{after:?}");
     let again = f.outsider("\"$SV\" create --ephemeral bao");
     assert!(again.status.success(), "{again:?}");
 }
 
-/// An ephemeral vault has no passphrase, so nothing can unlock, export or re-key it,
-/// and it cannot take the name of another vault.
+/// Ephemeral and stored vaults are apart: an ephemeral vault is no stored vault to
+/// unlock, export or re-key, and either kind may have the other's names.
 #[test]
-fn an_ephemeral_vault_cannot_be_unlocked_exported_or_named_like_another() {
+fn ephemeral_and_stored_vaults_are_apart() {
     let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
         return;
     };
@@ -1464,23 +1468,29 @@ fn an_ephemeral_vault_cannot_be_unlocked_exported_or_named_like_another() {
         r#""$SV" create --ephemeral tmp >/dev/null || exit 99
         sh -c 'echo "{PASSPHRASE}" | "$SV" unlock tmp --passphrase-stdin' && echo unlocked
         echo "{PASSPHRASE}" | "$SV" export --vault tmp --passphrase-stdin - >/dev/null && echo exported
-        printf '%s\n%s\n' "{PASSPHRASE}" "{PASSPHRASE}" | "$SV" passwd tmp --passphrase-stdin && echo rekeyed
         "$SV" create --ephemeral tmp && echo twice
-        "$SV" create --ephemeral default && echo shadowed
+        "$SV" create --ephemeral default >/dev/null || exit 98
+        printf mine > "$PIDVAULT_MOUNT/ephemeral/default/config"
+        cat "$PIDVAULT_MOUNT/ephemeral/default/config"; echo
+        cat "$PIDVAULT_MOUNT/stored/default/config" 2>/dev/null && echo leaked
+        "$SV" status
         true"#
     ));
     assert!(o.status.success(), "{o:?}");
-    assert_eq!(stdout(&o), "", "{o:?}");
+    let out = stdout(&o);
+    assert!(out.starts_with("mine\n"), "{o:?}");
+    assert!(!out.contains("unlocked\n") && !out.contains("exported") && !out.contains("twice"));
+    assert!(!out.contains("leaked"), "{o:?}");
+    assert!(out.contains("\ndefault: locked here"), "{out}");
+    assert!(out.contains("\nephemeral/default: of shell "), "{out}");
     let err = stderr_of(&o);
     for expected in [
-        "`tmp` is ephemeral: only the shell that created it",
-        "`tmp` is ephemeral: it has no passphrase and cannot be exported",
-        "`tmp` is ephemeral and has no passphrase",
+        "you have no vault `tmp`",
         "this shell already has an ephemeral vault `tmp`",
-        "you already have a vault `default`",
     ] {
         assert!(err.contains(expected), "missing {expected:?} in {err}");
     }
+    assert_eq!(stdout(&f.unlocked_shell("cat \"$MNT/config\"")), CONFIG);
 }
 
 /// Keys in an ephemeral vault sign through the agent like any other until it is locked,
@@ -1492,11 +1502,11 @@ fn locking_an_ephemeral_vault_ends_it_and_its_keys() {
     };
     let o = f.outsider(
         r#""$SV" create --ephemeral certs >/dev/null || exit 99
-        ssh-keygen -q -t ed25519 -N '' -C short-lived -f "$PIDVAULT_MOUNT/certs/id_ed25519"
+        ssh-keygen -q -t ed25519 -N '' -C short-lived -f "$PIDVAULT_MOUNT/ephemeral/certs/id_ed25519"
         SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l | grep -c short-lived
-        "$SV" lock certs >/dev/null
+        "$SV" lock --ephemeral certs >/dev/null
         SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l | grep -c short-lived
-        ls "$PIDVAULT_MOUNT""#,
+        ls "$PIDVAULT_MOUNT/ephemeral""#,
     );
     assert_eq!(stdout(&o), "1\n0\n", "{o:?}");
 }
@@ -1513,11 +1523,11 @@ fn shells_have_ephemeral_vaults_of_the_same_name_apart() {
         .args([
             "-c",
             r#""$SV" create --ephemeral bao >/dev/null || exit 99
-            printf first > "$PIDVAULT_MOUNT/bao/token"
+            printf first > "$PIDVAULT_MOUNT/ephemeral/bao/token"
             echo ready
             read -r _
-            cat "$PIDVAULT_MOUNT/bao/token"; echo
-            "$SV" status | grep -c '^bao:'"#,
+            cat "$PIDVAULT_MOUNT/ephemeral/bao/token"; echo
+            "$SV" status | grep -c 'bao:'"#,
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1530,11 +1540,13 @@ fn shells_have_ephemeral_vaults_of_the_same_name_apart() {
 
     let second = f.outsider(
         r#""$SV" create --ephemeral bao >/dev/null || exit 99
-        printf second > "$PIDVAULT_MOUNT/bao/token"
-        cat "$PIDVAULT_MOUNT/bao/token"; echo
-        "$SV" status | grep -c '^bao:'"#,
+        printf second > "$PIDVAULT_MOUNT/ephemeral/bao/token"
+        cat "$PIDVAULT_MOUNT/ephemeral/bao/token"; echo
+        "$SV" status | grep -c 'bao:'"#,
     );
-    let outsider = f.outsider("ls \"$PIDVAULT_MOUNT\"; \"$SV\" status | grep -c '^bao:'");
+    let outsider = f.outsider(
+        "ls \"$PIDVAULT_MOUNT/stored\"; ls \"$PIDVAULT_MOUNT/ephemeral\"; \"$SV\" status | grep -c 'bao:'",
+    );
 
     writeln!(first.stdin.take().unwrap()).unwrap();
     let mut rest = String::new();

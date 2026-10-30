@@ -92,15 +92,17 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
   `/proc/<pid>/fd`, which is a new open by the caller.
 - Kernel caching is off (zero TTLs, direct I/O), so nothing is served from cache.
 - An ephemeral vault has no passphrase, so it can never be unlocked: only the shell that
-  created it, and its descendants, see it at all (`fs::VaultState::seen_by`), in the
-  mount and in `status`. Its name is that shell's, so another process cannot take it
-  first or learn that it exists; within the shell it hides a stored vault of the same
-  name (`fs::UserState::vault_for`). Export and passwd refuse it.
+  created it, and its descendants, see it at all (`fs::VaultState::seen_by`), in
+  `/run/pidvault/ephemeral` and in `status`. Its name is that shell's, so another
+  process cannot take it first or learn that it exists. Stored vaults live apart in
+  `/run/pidvault/stored`, and every request names its kind (`fs::UserState::vault_in`),
+  so neither kind can stand in for the other; unlock, export and passwd know only
+  stored vaults.
 - Evidence: e2e `outsider_sees_an_empty_directory`,
   `outsider_is_refused_while_a_shell_is_unlocked`, `access_ends_when_the_shell_exits`,
   `lock_revokes_access_for_the_shell`, `an_orphaned_unlock_does_not_unlock_its_adopter`,
   `only_unlocked_shells_can_write`,
-  `an_ephemeral_vault_cannot_be_unlocked_exported_or_named_like_another`,
+  `ephemeral_and_stored_vaults_are_apart`,
   `shells_have_ephemeral_vaults_of_the_same_name_apart`;
   VM "another process of alice sees nothing", "alice's user services see nothing".
 
@@ -133,8 +135,8 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
 
 ### C4. Other users learn nothing about a user's vaults
 
-- A user's directory under `/run/pidvault` is their own inode, mode 0700 and listed only
-  to them; another user asking for a vault by name gets `ENOENT`, whether or not it
+- A user's vault directory under `/run/pidvault/stored` or `/run/pidvault/ephemeral` is
+  their own inode, mode 0700 and listed only to them; another user asking for a vault by name gets `ENOENT`, whether or not it
   exists. Vault names are checked (`fs::check_vault_name`), and tar paths reduced to
   normal components, so nothing escapes `/var/lib/pidvault/<uid>`.
 - Evidence: unit `hostile_vault_names_are_refused`,
