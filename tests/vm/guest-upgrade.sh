@@ -73,18 +73,20 @@ check "alice's vaults belong to the daemon" equals \
 
 # --- the vault after the upgrade ---------------------------------------------
 
-check "alice lists both her vaults" equals "$(as alice ls /run/pidvault | tr '\n' ' ')" "default work "
+check "alice lists both her vaults" equals "$(as alice ls /run/pidvault/stored | tr '\n' ' ')" "default work "
+check "alice points her stub and config at the new paths" unlocked alice \
+    "pidvault stub > ~/.ssh/config && sed -i -E 's#/run/pidvault/(stored/)?#/run/pidvault/stored/#g' /run/pidvault/stored/*/config"
 check "the vault opens with its passphrase and keeps the edit" unlocked alice \
-    'grep -q "LogLevel QUIET" /run/pidvault/default/config'
+    'grep -q "LogLevel QUIET" /run/pidvault/stored/default/config'
 check "the second vault opens too" as alice sh -c \
-    'echo work-secret-phrase | pidvault unlock work --passphrase-stdin >/dev/null && test -d /run/pidvault/work'
+    'echo work-secret-phrase | pidvault unlock work --passphrase-stdin >/dev/null && test -d /run/pidvault/stored/work'
 check "the agent signs with the vault key" equals "$(unlocked alice 'ssh vm echo logged-in')" logged-in
 check "the added key is still offered, and still unreadable" unlocked alice \
-    'SSH_AUTH_SOCK=/run/pidvault-agent.sock ssh-add -l | grep -q old-github && ! cat /run/pidvault/default/id_github 2>/dev/null'
-check "another process of alice sees nothing" refused as alice cat /run/pidvault/default/config
-check "alice writes to the vault after the upgrade" unlocked alice 'echo "# after" >> /run/pidvault/default/config'
+    'SSH_AUTH_SOCK=/run/pidvault-agent.sock ssh-add -l | grep -q old-github && ! cat /run/pidvault/stored/default/id_github 2>/dev/null'
+check "another process of alice sees nothing" refused as alice cat /run/pidvault/stored/default/config
+check "alice writes to the vault after the upgrade" unlocked alice 'echo "# after" >> /run/pidvault/stored/default/config'
 systemctl restart pidvault
-check "the write survives a restart" unlocked alice 'grep -q "^# after" /run/pidvault/default/config'
+check "the write survives a restart" unlocked alice 'grep -q "^# after" /run/pidvault/stored/default/config'
 check "daemon logged no warnings" refused sh -c 'journalctl -b -u pidvault | grep -qi warning'
 
 finish

@@ -10,7 +10,7 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
-use pidvault::protocol::{Request, Response};
+use pidvault::protocol::{Request, Response, VaultStatus};
 use pidvault::{daemon, fs, keys, procs, protocol, secret, tree, vault};
 
 /// Per-shell access to an encrypted SSH configuration directory.
@@ -105,6 +105,9 @@ enum Command {
     /// Revoke the calling shell's access to a vault, or to all of them
     Lock {
         vault: Option<String>,
+        /// The vault is this shell's ephemeral one, not a stored one
+        #[arg(long, requires = "vault")]
+        ephemeral: bool,
         /// Revoke access for all of your shells
         #[arg(long)]
         all: bool,
@@ -112,6 +115,9 @@ enum Command {
     /// Show your vaults; exit 0 if the calling shell has the vault (or any) unlocked
     Status {
         vault: Option<String>,
+        /// The vault is this shell's ephemeral one, not a stored one
+        #[arg(long, requires = "vault")]
+        ephemeral: bool,
         /// Print nothing, not even errors
         #[arg(long, short)]
         quiet: bool,
@@ -216,8 +222,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let vault = vault.unwrap_or_else(|| fs::DEFAULT_VAULT.to_owned());
             fs::check_vault_name(&vault)?;
             let status = protocol::call(&cli.socket, &Request::Status)?;
-            match status.vault(&vault) {
-                Some(existing) if existing.ephemeral => {
+            match status.vault_in(ephemeral, &vault) {
+                Some(_) if ephemeral => {
                     bail!("this shell already has an ephemeral vault `{vault}`")
                 }
                 Some(_) => bail!(
@@ -239,7 +245,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 println!(
                     "\nWhat you put in {} stays in memory only. It is gone when this shell \
                      exits or locks it, or the daemon stops.",
-                    cli.mount.join(&vault).display()
+                    cli.mount.join(fs::EPHEMERAL).join(&vault).display()
                 );
                 return Ok(ExitCode::SUCCESS);
             }
@@ -264,7 +270,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     sealed
                 }
                 None => {
-                    let config = starter_config(&cli.mount.join(&vault), &cli.agent_socket);
+                    let config =
+                        starter_config(&cli.mount.join(fs::STORED).join(&vault), &cli.agent_socket);
                     let failed = |e| anyhow::anyhow!("cannot prepare the starter config: {e:?}");
                     let mut tree = tree::Tree::empty();
                     let ino = tree
@@ -275,7 +282,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             };
             let data = base64::engine::general_purpose::STANDARD.encode(sealed);
-            let dir = cli.mount.join(&vault);
+            let dir = cli.mount.join(fs::STORED).join(&vault);
             report(protocol::call(
                 &cli.socket,
                 &Request::Import {
@@ -324,11 +331,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 },
             )?)
         }
-        Command::Lock { vault, all } => {
-            report(protocol::call(&cli.socket, &Request::Lock { vault, all })?)
-        }
+        Command::Lock {
+            vault,
+            ephemeral,
+            all,
+        } => report(protocol::call(
+            &cli.socket,
+            &Request::Lock {
+                vault,
+                all,
+                ephemeral,
+            },
+        )?),
         Command::Status {
             vault,
+            ephemeral,
             quiet,
             prompt,
         } => {
@@ -338,7 +355,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 Err(e) => return Err(e),
             };
             if prompt {
-                let line = prompt_line(&reply, vault.as_deref());
+                let line = prompt_line(&reply, vault.as_deref().map(|name| (ephemeral, name)));
                 if !line.is_empty() {
                     println!("{line}");
                 }
@@ -346,7 +363,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 print_status(&reply);
             }
             let unlocked = match &vault {
-                Some(name) => reply.vault(name).is_some_and(|v| v.unlocked_by.is_some()),
+                Some(name) => reply
+                    .vault_in(ephemeral, name)
+                    .is_some_and(|v| v.unlocked_by.is_some()),
                 None => reply.any_unlocked(),
             };
             Ok(if unlocked {
@@ -454,7 +473,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             {
                 bail!("--name must be a plain path inside the vault");
             }
-            let private_path = cli.mount.join(&vault).join(&name);
+            let private_path = cli.mount.join(fs::STORED).join(&vault).join(&name);
             let public_path = private_path.with_file_name(format!(
                 "{}.pub",
                 private_path
@@ -567,8 +586,8 @@ fn print_status(reply: &Response) {
     for vault in &reply.vaults {
         match vault.unlocked_by {
             Some(shell) if vault.ephemeral => println!(
-                "{}: ephemeral, of shell {shell}{}",
-                vault.name,
+                "{}: of shell {shell}{}, in memory only",
+                shown_name(vault),
                 vault
                     .expires_in
                     .map(|secs| format!(" for another {}", daemon::format_duration(secs)))
@@ -594,16 +613,28 @@ fn print_status(reply: &Response) {
     }
 }
 
+/// A vault as the user names it: stored ones by name, ephemeral ones as `ephemeral/NAME`.
+fn shown_name(vault: &VaultStatus) -> String {
+    if vault.ephemeral {
+        format!("{}/{}", fs::EPHEMERAL, vault.name)
+    } else {
+        vault.name.clone()
+    }
+}
+
 /// The vaults the calling shell has unlocked, each with the time it has left, e.g.
-/// `default 9m, work`.
-fn prompt_line(reply: &Response, only: Option<&str>) -> String {
+/// `default 9m, work, ephemeral/bao 2h`; with `only`, just that vault.
+fn prompt_line(reply: &Response, only: Option<(bool, &str)>) -> String {
     reply
         .vaults
         .iter()
-        .filter(|v| v.unlocked_by.is_some() && only.is_none_or(|name| v.name == name))
+        .filter(|v| {
+            v.unlocked_by.is_some()
+                && only.is_none_or(|(ephemeral, name)| v.ephemeral == ephemeral && v.name == name)
+        })
         .map(|v| match v.expires_in {
-            Some(secs) => format!("{} {}", v.name, short_duration(secs)),
-            None => v.name.clone(),
+            Some(secs) => format!("{} {}", shown_name(v), short_duration(secs)),
+            None => shown_name(v),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -660,10 +691,11 @@ fn stub(mount: &Path, agent_socket: &Path) -> Result<String> {
          Match exec \"{} status --quiet\"\n\
          \x20   IdentityAgent {}\n\
          \x20   AddKeysToAgent no\n\
-         \x20   Include {}",
+         \x20   Include {} {}",
         exe.display(),
         agent_socket.display(),
-        mount.join("*").join("config").display()
+        mount.join(fs::STORED).join("*").join("config").display(),
+        mount.join(fs::EPHEMERAL).join("*").join("config").display()
     ))
 }
 
