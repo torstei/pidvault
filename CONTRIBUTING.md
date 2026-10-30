@@ -1,10 +1,10 @@
 # Contributing
 
-Questions, bug reports and ideas go in [GitHub issues](https://github.com/torstei/sshvault/issues).
+Questions, bug reports and ideas go in [GitHub issues](https://github.com/torstei/pidvault/issues).
 Report vulnerabilities privately instead, as [SECURITY.md](SECURITY.md) describes.
 
 Changes go in as pull requests against `main`. A pull request is merged once CI passes;
-`main` accepts nothing else. sshvault is opinionated: it aims to be one way of working
+`main` accepts nothing else. pidvault is opinionated: it aims to be one way of working
 that works, not a set of options. An issue before a larger change saves work on both
 sides.
 

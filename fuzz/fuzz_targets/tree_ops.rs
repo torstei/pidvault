@@ -8,8 +8,8 @@ use std::ffi::OsStr;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use sshvault::keys::PLAIN_OPENSSH_KEY;
-use sshvault::tree::{Kind, ROOT, Tree};
+use pidvault::keys::PLAIN_OPENSSH_KEY;
+use pidvault::tree::{Kind, ROOT, Tree};
 
 const NAMES: [&str; 4] = ["a", "b", "id", "keys"];
 

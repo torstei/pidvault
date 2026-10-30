@@ -34,9 +34,9 @@ in_manager() {
 unlocked() {
     local user=$1
     shift
-    as "$user" sh -c "echo $user$PASS_SUFFIX | sshvault unlock --passphrase-stdin >/dev/null && $*"
+    as "$user" sh -c "echo $user$PASS_SUFFIX | pidvault unlock --passphrase-stdin >/dev/null && $*"
 }
-daemon_pid() { systemctl show --property MainPID --value sshvault; }
+daemon_pid() { systemctl show --property MainPID --value pidvault; }
 # a check about the daemon process must fail, not pass, when there is none
 live_daemon() {
     local pid
@@ -51,10 +51,10 @@ no_home() { ! nsenter --target "$1" --mount ls /home/ubuntu >/dev/null 2>&1; }
 finish() {
     echo "1..$n"
     {
-        echo "--- journalctl -u sshvault"
-        journalctl -b -u sshvault --no-pager -o short-monotonic | tail -n 60
+        echo "--- journalctl -u pidvault"
+        journalctl -b -u pidvault --no-pager -o short-monotonic | tail -n 60
         echo "--- mounts"
-        findmnt -n /run/sshvault
+        findmnt -n /run/pidvault
     } | sed 's/^/# /'
     echo "# done"
 }

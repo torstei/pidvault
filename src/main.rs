@@ -10,8 +10,8 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
-use sshvault::protocol::{Request, Response};
-use sshvault::{daemon, fs, keys, procs, protocol, secret, tree, vault};
+use pidvault::protocol::{Request, Response};
+use pidvault::{daemon, fs, keys, procs, protocol, secret, tree, vault};
 
 /// Per-shell access to an encrypted SSH configuration directory.
 #[derive(Parser)]
@@ -21,24 +21,24 @@ struct Cli {
     #[arg(
         long,
         global = true,
-        env = "SSHVAULT_SOCKET",
-        default_value = "/run/sshvault.sock"
+        env = "PIDVAULT_SOCKET",
+        default_value = "/run/pidvault.sock"
     )]
     socket: PathBuf,
     /// The agent that signs with vault keys
     #[arg(
         long,
         global = true,
-        env = "SSHVAULT_AGENT_SOCKET",
-        default_value = "/run/sshvault-agent.sock"
+        env = "PIDVAULT_AGENT_SOCKET",
+        default_value = "/run/pidvault-agent.sock"
     )]
     agent_socket: PathBuf,
     /// Where the daemon mounts; each of your vaults is a directory inside it
     #[arg(
         long,
         global = true,
-        env = "SSHVAULT_MOUNT",
-        default_value = "/run/sshvault"
+        env = "PIDVAULT_MOUNT",
+        default_value = "/run/pidvault"
     )]
     mount: PathBuf,
     #[command(subcommand)]
@@ -50,14 +50,14 @@ enum Command {
     /// Serve the vaults (started by the systemd unit)
     Daemon {
         /// Where vaults are stored, one directory per uid
-        #[arg(long, default_value = "/var/lib/sshvault")]
+        #[arg(long, default_value = "/var/lib/pidvault")]
         state_dir: PathBuf,
         /// Mount and bind as the invoking user. For testing only: the daemon is then
         /// indistinguishable from any other process of that user.
         #[arg(long)]
         unprivileged: bool,
         /// Where the mount helper hands over the FUSE connection
-        #[arg(long, default_value = "/run/sshvault-mount.sock")]
+        #[arg(long, default_value = "/run/pidvault-mount.sock")]
         mount_socket: PathBuf,
         /// scrypt cost (log2) for wrapping vault keys; only lower it for tests
         #[arg(long, hide = true)]
@@ -159,7 +159,7 @@ enum Command {
     /// Print the lines to put at the top of ~/.ssh/config
     Stub,
     /// Print bash code that marks shells with a vault unlocked, in the prompt and the
-    /// terminal title; use it with `eval "$(sshvault shell-init)"` in ~/.bashrc
+    /// terminal title; use it with `eval "$(pidvault shell-init)"` in ~/.bashrc
     ShellInit,
 }
 
@@ -167,7 +167,7 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("sshvault: {e:#}");
+            eprintln!("pidvault: {e:#}");
             ExitCode::from(2)
         }
     }
@@ -207,7 +207,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let status = protocol::call(&cli.socket, &Request::Status)?;
             if status.vault(&vault).is_some() {
                 bail!(
-                    "you already have a vault `{vault}`; to replace it, `sshvault import` an exported one"
+                    "you already have a vault `{vault}`; to replace it, `pidvault import` an exported one"
                 );
             }
             if !no_unlock {
@@ -229,7 +229,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 Some(from) => {
                     let (sealed, skipped) = vault::seal(&from, secret, work_factor)?;
                     for path in skipped {
-                        eprintln!("sshvault: left out {} (not a regular file)", path.display());
+                        eprintln!("pidvault: left out {} (not a regular file)", path.display());
                     }
                     sealed
                 }
@@ -256,14 +256,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 },
             )?)?;
             if no_unlock {
-                println!("\nunlock it with:  sshvault unlock {vault}");
+                println!("\nunlock it with:  pidvault unlock {vault}");
             }
             println!(
                 "\nPut keys in it, which can then be used but never read:\n\
                  \x20   ssh-keygen -t ed25519 -N '' -f {dir}/id_ed25519\n\
-                 \x20   sshvault add-key{flag} ~/.ssh/SOME_KEY\n\
+                 \x20   pidvault add-key{flag} ~/.ssh/SOME_KEY\n\
                  Describe your hosts in {dir}/config, then use it either through the block\n\
-                 `sshvault stub` prints for the top of ~/.ssh/config, or directly:\n\
+                 `pidvault stub` prints for the top of ~/.ssh/config, or directly:\n\
                  \x20   ssh -F {dir}/config HOST",
                 dir = dir.display(),
                 flag = if vault == fs::DEFAULT_VAULT {
@@ -410,7 +410,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .is_some_and(|v| v.unlocked_by.is_some())
             {
                 bail!(
-                    "`{vault}` is not unlocked in this shell; run `sshvault unlock {vault}` first"
+                    "`{vault}` is not unlocked in this shell; run `pidvault unlock {vault}` first"
                 );
             }
             let name = match name {
@@ -469,7 +469,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::ShellInit => {
-            let exe = std::env::current_exe().context("cannot tell where sshvault is installed")?;
+            let exe = std::env::current_exe().context("cannot tell where pidvault is installed")?;
             print!("{}", shell_init(&exe));
             Ok(ExitCode::SUCCESS)
         }
@@ -479,7 +479,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
 /// What an empty vault starts with: enough for `ssh -F` to sign through the vault agent.
 fn starter_config(dir: &Path, agent_socket: &Path) -> String {
     format!(
-        "# Readable only in shells that unlocked this vault. Used through the sshvault block\n\
+        "# Readable only in shells that unlocked this vault. Used through the pidvault block\n\
          # in ~/.ssh/config, or directly:  ssh -F {dir}/config HOST\n\
          \n\
          # Keys in this vault cannot be read, only used through the vault agent.\n\
@@ -532,7 +532,7 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 
 fn print_status(reply: &Response) {
     if reply.vaults.is_empty() {
-        println!("no vault yet; create one with `sshvault create`");
+        println!("no vault yet; create one with `pidvault create`");
     }
     for vault in &reply.vaults {
         match vault.unlocked_by {
@@ -586,37 +586,37 @@ fn short_duration(secs: u64) -> String {
 }
 
 /// Vault names cannot contain anything bash would expand in PS1.
-const SHELL_INIT: &str = r#"# sshvault: while this shell has a vault unlocked, a red marker before the prompt
+const SHELL_INIT: &str = r#"# pidvault: while this shell has a vault unlocked, a red marker before the prompt
 # and the vault names in the terminal title.
-__sshvault_prompt() {
+__pidvault_prompt() {
     local status=$? vaults
-    [[ -n ${__sshvault_head-} ]] && PS1=${PS1//"$__sshvault_head"/}
-    [[ -n ${__sshvault_tail-} ]] && PS1=${PS1//"$__sshvault_tail"/}
-    __sshvault_head='' __sshvault_tail=''
-    if vaults=$(SSHVAULT_EXE status --prompt 2>/dev/null); then
-        __sshvault_head="\[\e[1;97;41m\] 🔑 $vaults \[\e[0m\] "
+    [[ -n ${__pidvault_head-} ]] && PS1=${PS1//"$__pidvault_head"/}
+    [[ -n ${__pidvault_tail-} ]] && PS1=${PS1//"$__pidvault_tail"/}
+    __pidvault_head='' __pidvault_tail=''
+    if vaults=$(PIDVAULT_EXE status --prompt 2>/dev/null); then
+        __pidvault_head="\[\e[1;97;41m\] 🔑 $vaults \[\e[0m\] "
         # last in PS1, after anything else there that sets the title
-        __sshvault_tail="\[\e]2;🔑 $vaults — \u@\h: \w\a\]"
-        PS1=$__sshvault_head$PS1$__sshvault_tail
-        __sshvault_titled=1
-    elif [[ -n ${__sshvault_titled-} ]]; then
+        __pidvault_tail="\[\e]2;🔑 $vaults — \u@\h: \w\a\]"
+        PS1=$__pidvault_head$PS1$__pidvault_tail
+        __pidvault_titled=1
+    elif [[ -n ${__pidvault_titled-} ]]; then
         printf '\e]2;%s@%s: %s\a' "$USER" "${HOSTNAME%%.*}" "${PWD/#"$HOME"/\~}"
-        __sshvault_titled=''
+        __pidvault_titled=''
     fi
     return "$status"
 }
-[[ " ${PROMPT_COMMAND[*]-} " == *" __sshvault_prompt "* ]] || PROMPT_COMMAND+=(__sshvault_prompt)
+[[ " ${PROMPT_COMMAND[*]-} " == *" __pidvault_prompt "* ]] || PROMPT_COMMAND+=(__pidvault_prompt)
 "#;
 
 fn shell_init(exe: &Path) -> String {
     let quoted = format!("'{}'", exe.display().to_string().replace('\'', r"'\''"));
-    SHELL_INIT.replace("SSHVAULT_EXE", &quoted)
+    SHELL_INIT.replace("PIDVAULT_EXE", &quoted)
 }
 
 fn stub(mount: &Path, agent_socket: &Path) -> Result<String> {
-    let exe = std::env::current_exe().context("cannot tell where sshvault is installed")?;
+    let exe = std::env::current_exe().context("cannot tell where pidvault is installed")?;
     Ok(format!(
-        "# sshvault: keep this block above every Host and Match block. In a shell with a vault\n\
+        "# pidvault: keep this block above every Host and Match block. In a shell with a vault\n\
          # unlocked, vault entries take precedence, vault keys sign through the vault agent,\n\
          # and no key is handed to any other agent.\n\
          Match exec \"{} status --quiet\"\n\
@@ -735,22 +735,22 @@ mod tests {
     }
 
     /// The packaged man page is generated from the command line definitions. Run with
-    /// SSHVAULT_WRITE_MAN=1 to regenerate it after changing them.
+    /// PIDVAULT_WRITE_MAN=1 to regenerate it after changing them.
     #[test]
     fn the_man_page_is_up_to_date() {
         use clap::CommandFactory;
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/sshvault.1");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/pidvault.1");
         let mut page = Vec::new();
         clap_mangen::Man::new(Cli::command())
             .render(&mut page)
             .unwrap();
-        if std::env::var_os("SSHVAULT_WRITE_MAN").is_some() {
+        if std::env::var_os("PIDVAULT_WRITE_MAN").is_some() {
             std::fs::write(&path, &page).unwrap();
         }
         let packaged = std::fs::read(&path).unwrap_or_default();
         assert!(
             packaged == page,
-            "packaging/sshvault.1 is stale; run SSHVAULT_WRITE_MAN=1 cargo test the_man_page"
+            "packaging/pidvault.1 is stale; run PIDVAULT_WRITE_MAN=1 cargo test the_man_page"
         );
     }
 }

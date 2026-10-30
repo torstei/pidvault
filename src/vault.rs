@@ -49,7 +49,7 @@ pub fn seal(
     Ok((encrypt(&plain, passphrase, work_factor)?, skipped))
 }
 
-/// scrypt cost (log2) for what sshvault itself encrypts with a passphrase: 256 MiB and
+/// scrypt cost (log2) for what pidvault itself encrypts with a passphrase: 256 MiB and
 /// around a second, fixed so that the daemon's limit below leaves room.
 pub const PASSPHRASE_WORK_FACTOR: u8 = 18;
 
@@ -105,7 +105,7 @@ pub fn decrypt(ciphertext: &[u8], passphrase: SecretString) -> Result<SecretBuf>
             | age::DecryptError::KeyDecryptionFailed
             | age::DecryptError::NoMatchingKeys => anyhow::Error::new(WrongPassphrase),
             age::DecryptError::ExcessiveWork { required, .. } => anyhow::anyhow!(
-                "this file needs scrypt cost 2^{required}, more than the 2^{MAX_WORK_FACTOR} sshvault spends"
+                "this file needs scrypt cost 2^{required}, more than the 2^{MAX_WORK_FACTOR} pidvault spends"
             ),
             other => anyhow::anyhow!("cannot open vault: {other}"),
         })?;
@@ -182,7 +182,7 @@ impl Key {
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
-const MAGIC: &[u8] = b"sshvault-v1\n";
+const MAGIC: &[u8] = b"pidvault-v1\n";
 
 /// What is stored for each user: K wrapped with the passphrase, and the contents
 /// encrypted with K. One file, so a save replaces both in a single rename.
@@ -203,7 +203,7 @@ impl Stored {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Stored> {
-        let rest = bytes.strip_prefix(MAGIC).context("not an sshvault vault")?;
+        let rest = bytes.strip_prefix(MAGIC).context("not a pidvault vault")?;
         let (len, rest) = rest.split_first_chunk::<4>().context("truncated vault")?;
         let len = u32::from_be_bytes(*len) as usize;
         if rest.len() < len {
@@ -359,23 +359,23 @@ mod tests {
     #[test]
     fn write_replaces_atomically_and_keeps_the_previous_when_asked() {
         let out = tempfile::tempdir().unwrap();
-        let path = out.path().join("v/vault.sshvault");
+        let path = out.path().join("v/vault.pidvault");
         let (_, first) = stored("one");
         let (_, second) = stored("two");
         first.write(&path, true).unwrap();
         second.write(&path, true).unwrap();
         let current = Stored::read(&path).unwrap();
         assert!(Key::unwrap(&current.wrapped_key, secret("two")).is_ok());
-        let previous = Stored::read(&out.path().join("v/vault.sshvault.previous")).unwrap();
+        let previous = Stored::read(&out.path().join("v/vault.pidvault.previous")).unwrap();
         assert!(Key::unwrap(&previous.wrapped_key, secret("one")).is_ok());
-        assert!(!out.path().join("v/vault.sshvault.new").exists());
+        assert!(!out.path().join("v/vault.pidvault.new").exists());
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
 
         first.write(&path, false).unwrap();
-        let previous = Stored::read(&out.path().join("v/vault.sshvault.previous")).unwrap();
+        let previous = Stored::read(&out.path().join("v/vault.pidvault.previous")).unwrap();
         assert!(
             Key::unwrap(&previous.wrapped_key, secret("one")).is_ok(),
             "previous unchanged"

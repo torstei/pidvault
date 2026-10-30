@@ -1,12 +1,12 @@
 # Security policy
 
-sshvault holds SSH keys and configuration, so a weakness in it can expose them. Please
+pidvault holds SSH keys and configuration, so a weakness in it can expose them. Please
 report anything you find privately, not in a public issue.
 
 ## Reporting
 
 Use GitHub's private vulnerability reporting:
-<https://github.com/torstei/sshvault/security/advisories/new>. Include what an attacker
+<https://github.com/torstei/pidvault/security/advisories/new>. Include what an attacker
 needs (which user, which process, what access), what they gain, and how to reproduce it.
 
 You will get an answer within a week. Fixes are released as a new version in the apt
@@ -27,4 +27,4 @@ such a process deny service to other users.
 
 The README's "What it does not do" section lists what is out of scope by design, such as
 root and what runs inside an unlocked shell. [docs/security-design.md](docs/security-design.md)
-has the threat model, the claims sshvault makes, and its known limitations.
+has the threat model, the claims pidvault makes, and its known limitations.

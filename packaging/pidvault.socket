@@ -1,9 +1,9 @@
 [Unit]
-Description=sshvault control and agent sockets
+Description=pidvault control and agent sockets
 
 [Socket]
-ListenStream=/run/sshvault.sock
-ListenStream=/run/sshvault-agent.sock
+ListenStream=/run/pidvault.sock
+ListenStream=/run/pidvault-agent.sock
 # everyone may connect; the daemon tells callers apart by their credentials
 SocketMode=0666
 RemoveOnStop=yes

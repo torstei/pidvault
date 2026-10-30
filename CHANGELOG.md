@@ -2,9 +2,13 @@
 
 ## Unreleased
 
-- `eval "$(sshvault shell-init)"` in `~/.bashrc` marks shells that have a vault
+- sshvault is now pidvault: the package, the command, the service account, `/run/pidvault`,
+  `/var/lib/pidvault`, the `PIDVAULT_*` variables and the apt repository, now at
+  https://torstei.github.io/pidvault. Installing pidvault replaces sshvault and takes over
+  its vaults; "Moving from sshvault" in the README has the steps left to you.
+- `eval "$(pidvault shell-init)"` in `~/.bashrc` marks shells that have a vault
   unlocked: a red marker before the prompt and the vault names in the terminal title,
-  with the time left after `unlock --for`. `sshvault status --prompt` prints just that.
+  with the time left after `unlock --for`. `pidvault status --prompt` prints just that.
 
 ## 0.3.1 - 2026-10-24
 

@@ -4,8 +4,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sshvault::tree::Tree;
-use sshvault::vault::{Stored, check_sealed};
+use pidvault::tree::Tree;
+use pidvault::vault::{Stored, check_sealed};
 
 fuzz_target!(|data: &[u8]| {
     let _ = check_sealed(data);

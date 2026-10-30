@@ -64,7 +64,7 @@ jobs:
         run: |
           command -v cargo-deny || cargo install cargo-deny --locked
           cargo deny check
-      # sshvault refuses to unlock where any process could trace an unlocked shell
+      # pidvault refuses to unlock where any process could trace an unlocked shell
       - name: Restrict ptrace as Ubuntu does by default
         run: sudo sysctl -w kernel.yama.ptrace_scope=1
       - run: cargo test
@@ -116,23 +116,23 @@ jobs:
           key: vm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/sshvault-vm
+          path: ~/.cache/pidvault-vm
           key: cloud-image-${{ hashFiles('tests/vm/run.sh') }}
       - name: Install cargo-deb
         run: command -v cargo-deb || cargo install cargo-deb --locked
       - name: Run the VM tests
         env:
-          SSHVAULT_VM_KEEP: "1"
+          PIDVAULT_VM_KEEP: "1"
           TMPDIR: ${{ runner.temp }}
         run: rm -rf target/debian && tests/vm/run.sh
       # the tag is about uploads to Debian itself, which this package never makes
       - name: Check the package with lintian
-        run: lintian --fail-on error,warning --suppress-tags initial-upload-closes-no-bugs target/debian/sshvault_*.deb
+        run: lintian --fail-on error,warning --suppress-tags initial-upload-closes-no-bugs target/debian/pidvault_*.deb
       - name: Keep the VM logs
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: vm-logs
           path: |
-            ${{ runner.temp }}/sshvault-vm.*/console.log
-            ${{ runner.temp }}/sshvault-vm.*/results.clean.tap
+            ${{ runner.temp }}/pidvault-vm.*/console.log
+            ${{ runner.temp }}/pidvault-vm.*/results.clean.tap

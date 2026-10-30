@@ -24,7 +24,7 @@ fn debian_changelog(changelog: &str) -> String {
             .filter(|&&(_, other)| other == date)
             .count() as i64;
         out.push_str(&format!(
-            "sshvault ({version}-1) stable; urgency=medium\n\n  \
+            "pidvault ({version}-1) stable; urgency=medium\n\n  \
              * Release {version}; see changelog.gz in this directory.\n\n \
              -- {MAINTAINER}  {}\n\n",
             rfc2822(year, month, day, earlier_that_day)
@@ -87,23 +87,23 @@ fn releases_on_the_same_day_get_later_times() {
 }
 
 /// The packaged Debian changelog is generated from CHANGELOG.md. Run with
-/// SSHVAULT_WRITE_CHANGELOG=1 to regenerate it after dating a release there.
+/// PIDVAULT_WRITE_CHANGELOG=1 to regenerate it after dating a release there.
 #[test]
 fn the_debian_changelog_is_up_to_date() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = root.join("packaging/changelog.Debian");
     let generated = debian_changelog(&std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap());
     assert!(
-        generated.starts_with("sshvault ("),
+        generated.starts_with("pidvault ("),
         "no dated release in CHANGELOG.md"
     );
-    if std::env::var_os("SSHVAULT_WRITE_CHANGELOG").is_some() {
+    if std::env::var_os("PIDVAULT_WRITE_CHANGELOG").is_some() {
         std::fs::write(&path, &generated).unwrap();
     }
     let packaged = std::fs::read_to_string(&path).unwrap_or_default();
     assert!(
         packaged == generated,
-        "packaging/changelog.Debian is stale; run SSHVAULT_WRITE_CHANGELOG=1 cargo test --test packaging"
+        "packaging/changelog.Debian is stale; run PIDVAULT_WRITE_CHANGELOG=1 cargo test --test packaging"
     );
 }
 

@@ -1,19 +1,19 @@
 [Unit]
 Description=Per-shell access to encrypted SSH configuration
-Documentation=man:sshvault(1) https://github.com/torstei/sshvault
-Requires=sshvault.socket sshvault-mount.socket
-After=sshvault.socket sshvault-mount.socket local-fs.target systemd-sysusers.service
+Documentation=man:pidvault(1) https://github.com/torstei/pidvault
+Requires=pidvault.socket pidvault-mount.socket
+After=pidvault.socket pidvault-mount.socket local-fs.target systemd-sysusers.service
 
 [Service]
 Type=exec
-User=sshvault
-Group=sshvault
-# Never root: the mount, the one step that needs it, is made by sshvault-mount.service,
+User=pidvault
+Group=pidvault
+# Never root: the mount, the one step that needs it, is made by pidvault-mount.service,
 # which hands over the FUSE connection and unmounts once this daemon is gone.
-ExecStart=/usr/bin/sshvault daemon
+ExecStart=/usr/bin/pidvault daemon
 Restart=on-failure
 
-StateDirectory=sshvault
+StateDirectory=pidvault
 StateDirectoryMode=0700
 UMask=0077
 LimitCORE=0

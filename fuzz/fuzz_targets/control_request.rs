@@ -2,7 +2,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sshvault::protocol::Request;
+use pidvault::protocol::Request;
 
 fuzz_target!(|data: &[u8]| {
     let line = data.split(|&b| b == b'\n').next().unwrap_or_default();

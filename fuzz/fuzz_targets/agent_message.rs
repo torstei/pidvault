@@ -3,7 +3,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sshvault::agent::{parse_request, read_message};
+use pidvault::agent::{parse_request, read_message};
 
 fuzz_target!(|data: &[u8]| {
     let mut stream = data;

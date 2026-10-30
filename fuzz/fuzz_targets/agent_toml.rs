@@ -2,7 +2,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sshvault::agent::Policy;
+use pidvault::agent::Policy;
 
 fuzz_target!(|data: &[u8]| {
     let _ = Policy::parse(data);
