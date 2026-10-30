@@ -250,10 +250,13 @@ bao login -method=oidc                      # bao stores its token in the vault
 ```
 
 An ephemeral vault starts empty and is held in memory only. It belongs to the shell that
-created it and what that shell starts: no other shell can unlock it, since there is no
-passphrase to prove it is you, and it cannot be exported. It is gone when that shell
-exits or locks it, when `--for` runs out, or when the daemon stops. Keys in it sign
-through the agent like any other, which suits short-lived SSH certificates.
+created it and what that shell starts: no other shell sees it or can unlock it, since
+there is no passphrase to prove it is you, and it cannot be exported. Its name is the
+shell's own, so every shell can have its own `bao` at the same path, and
+`BAO_TOKEN_PATH` can be set once in `~/.bashrc`; in a shell without one, bao finds no
+token. It is gone when that shell exits or locks it, when `--for` runs out, or when the
+daemon stops. Keys in it sign through the agent like any other, which suits short-lived
+SSH certificates.
 
 A secret in a vault is safe from your other processes only while programs read it from
 the vault themselves, as bao does here. A program that hands it on, through a pipe, a

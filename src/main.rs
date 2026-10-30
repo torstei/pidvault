@@ -216,10 +216,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let vault = vault.unwrap_or_else(|| fs::DEFAULT_VAULT.to_owned());
             fs::check_vault_name(&vault)?;
             let status = protocol::call(&cli.socket, &Request::Status)?;
-            if status.vault(&vault).is_some() {
-                bail!(
+            match status.vault(&vault) {
+                Some(existing) if existing.ephemeral => {
+                    bail!("this shell already has an ephemeral vault `{vault}`")
+                }
+                Some(_) => bail!(
                     "you already have a vault `{vault}`; to replace it, `pidvault import` an exported one"
-                );
+                ),
+                None => {}
             }
             if !no_unlock {
                 procs::check_tracing_restricted()?;
@@ -561,9 +565,6 @@ fn print_status(reply: &Response) {
         println!("no vault yet; create one with `pidvault create`");
     }
     for vault in &reply.vaults {
-        if vault.ephemeral && vault.unlocked_by.is_none() {
-            continue;
-        }
         match vault.unlocked_by {
             Some(shell) if vault.ephemeral => println!(
                 "{}: ephemeral, of shell {shell}{}",

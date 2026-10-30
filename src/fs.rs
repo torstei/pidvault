@@ -130,6 +130,16 @@ impl VaultState {
         }
     }
 
+    /// Whether `pid` sees this vault at all: a stored one always (its contents only once
+    /// unlocked), an ephemeral one only from its own shell.
+    pub fn seen_by(&self, pid: u32) -> bool {
+        if self.ephemeral {
+            self.open.is_some() && self.unlocked_ancestor(pid).is_some()
+        } else {
+            self.path.exists()
+        }
+    }
+
     /// Replaces what is held in memory, if it fits in `room` (from `UserState::room_for`);
     /// inodes of the previous tree stop resolving.
     pub fn hold(&mut self, unlocked: Unlocked, room: usize) -> Result<()> {
@@ -248,9 +258,15 @@ impl UserState {
         }
     }
 
-    /// What the vault `name` may hold beside the user's other unlocked vaults.
-    pub fn room_for(&self, name: &str) -> usize {
-        self.room_beside(self.vault(name).map(|v| v.index))
+    /// What the vault `name`, as `pid` sees it, may hold beside the user's other
+    /// unlocked vaults.
+    pub fn room_for(&self, name: &str, pid: u32) -> usize {
+        self.room_beside(self.vault_for(name, pid).map(|v| v.index))
+    }
+
+    /// What a vault about to be created may hold beside the user's unlocked vaults.
+    pub fn room_for_new(&self) -> usize {
+        self.room_beside(None)
     }
 
     fn room_beside(&self, index: Option<u8>) -> usize {
@@ -264,41 +280,91 @@ impl UserState {
         MAX_HELD_PER_USER.saturating_sub(others).min(MAX_SECRET)
     }
 
-    pub fn vault(&self, name: &str) -> Option<&VaultState> {
-        self.vaults.iter().find(|v| v.name == name)
+    fn stored_index(&self, name: &str) -> Option<usize> {
+        self.vaults
+            .iter()
+            .position(|v| !v.ephemeral && v.name == name)
     }
 
-    /// The existing vault called `name`. Requests about a vault that does not exist must
-    /// not register its name: a user's 255 places would otherwise fill up with names
-    /// anyone of their processes made up.
-    pub fn existing_vault_mut(&mut self, name: &str) -> Result<&mut VaultState> {
+    fn ephemeral_index(&self, name: &str, pid: u32) -> Option<usize> {
+        self.vaults
+            .iter()
+            .position(|v| v.ephemeral && v.name == name && v.seen_by(pid))
+    }
+
+    /// The vault `name` as `pid` sees it: its shell's ephemeral vault of that name, else
+    /// the stored one.
+    pub fn vault_for(&self, name: &str, pid: u32) -> Option<&VaultState> {
+        let index = self
+            .ephemeral_index(name, pid)
+            .or_else(|| self.stored_index(name))?;
+        Some(&self.vaults[index])
+    }
+
+    /// The vaults `pid` sees, an ephemeral one hiding a stored one of the same name.
+    pub fn vaults_for(&self, pid: u32) -> impl Iterator<Item = &VaultState> {
+        self.vaults.iter().filter(move |v| {
+            v.seen_by(pid) && (v.ephemeral || self.ephemeral_index(&v.name, pid).is_none())
+        })
+    }
+
+    /// The existing vault `name` as `pid` sees it. Requests about a vault that does not
+    /// exist must not register its name: a user's 255 places would otherwise fill up with
+    /// names anyone of their processes made up.
+    pub fn existing_vault_mut(&mut self, name: &str, pid: u32) -> Result<&mut VaultState> {
         check_vault_name(name)?;
-        let known = self.vaults.iter().any(|v| v.name == name);
-        if !known && !self.dir.join(format!("{name}{VAULT_SUFFIX}")).exists() {
+        if let Some(i) = self.ephemeral_index(name, pid) {
+            return Ok(&mut self.vaults[i]);
+        }
+        if self.stored_index(name).is_none() && !self.stored_path(name).exists() {
             bail!("you have no vault `{name}`; create one with `pidvault create {name}`");
         }
         self.vault_or_new(name)
     }
 
-    /// The vault called `name`, known from now on whether or not it exists yet; for
-    /// creating one. The place of an ephemeral vault that is gone is reused, so making
-    /// them up does not use up the user's 255 places.
+    fn stored_path(&self, name: &str) -> PathBuf {
+        self.dir.join(format!("{name}{VAULT_SUFFIX}"))
+    }
+
+    /// The stored vault called `name`, known from now on whether or not it exists yet;
+    /// for creating one.
     pub fn vault_or_new(&mut self, name: &str) -> Result<&mut VaultState> {
         check_vault_name(name)?;
-        let path = self.dir.join(format!("{name}{VAULT_SUFFIX}"));
-        let gone = |v: &VaultState| v.ephemeral && v.open.is_none() && v.sessions.is_empty();
-        if let Some(i) = self.vaults.iter().position(|v| v.name == name) {
-            let vault = &mut self.vaults[i];
-            if gone(vault) {
-                vault.ephemeral = false;
-            }
-            return Ok(vault);
+        if let Some(i) = self.stored_index(name) {
+            return Ok(&mut self.vaults[i]);
         }
+        let path = self.stored_path(name);
+        self.new_place(name, path, false)
+    }
+
+    /// A new ephemeral vault called `name` for the shell `pid` descends from, for the
+    /// caller to fill and register that shell with. Other shells may have their own
+    /// `name`; a stored vault of that name, or one this shell already has, refuses it.
+    pub fn new_ephemeral(&mut self, name: &str, pid: u32) -> Result<&mut VaultState> {
+        check_vault_name(name)?;
+        if self
+            .stored_index(name)
+            .is_some_and(|i| self.vaults[i].exists())
+            || self.stored_path(name).exists()
+        {
+            bail!("you already have a vault `{name}`; give the ephemeral one another name");
+        }
+        if self.ephemeral_index(name, pid).is_some() {
+            bail!("this shell already has an ephemeral vault `{name}`");
+        }
+        let path = self.stored_path(name);
+        self.new_place(name, path, true)
+    }
+
+    /// One of the user's 255 places for a vault. The place of an ephemeral vault that is
+    /// gone is reused, so that making them up does not use the places up.
+    fn new_place(&mut self, name: &str, path: PathBuf, ephemeral: bool) -> Result<&mut VaultState> {
+        let gone = |v: &VaultState| v.ephemeral && v.open.is_none() && v.sessions.is_empty();
         if let Some(i) = self.vaults.iter().position(gone) {
             let vault = &mut self.vaults[i];
             vault.name = name.to_owned();
             vault.path = path;
-            vault.ephemeral = false;
+            vault.ephemeral = ephemeral;
             return Ok(vault);
         }
         let Ok(index) = u8::try_from(self.vaults.len() + 1) else {
@@ -309,25 +375,11 @@ impl UserState {
             index,
             generation: 1,
             path,
-            ephemeral: false,
+            ephemeral,
             open: None,
             sessions: Sessions::new(),
         });
         Ok(self.vaults.last_mut().expect("just pushed"))
-    }
-
-    /// A new ephemeral vault called `name`, for the caller to fill and register a shell
-    /// with; refused if the user has any vault of that name.
-    pub fn new_ephemeral(&mut self, name: &str) -> Result<&mut VaultState> {
-        check_vault_name(name)?;
-        let taken = self.vault(name).is_some_and(VaultState::exists)
-            || self.dir.join(format!("{name}{VAULT_SUFFIX}")).exists();
-        if taken {
-            bail!("you already have a vault `{name}`");
-        }
-        let vault = self.vault_or_new(name)?;
-        vault.ephemeral = true;
-        Ok(vault)
     }
 
     fn by_index(&self, index: u8) -> Option<&VaultState> {
@@ -458,7 +510,9 @@ impl VaultFs {
         }
         let vault = user.by_index(index)?;
         if generation == 0 && local == tree::ROOT {
-            return vault.exists().then_some(Target::VaultDir(user, vault));
+            return vault
+                .seen_by(req.pid())
+                .then_some(Target::VaultDir(user, vault));
         }
         if generation != vault.generation {
             return None;
@@ -631,8 +685,8 @@ impl Filesystem for VaultFs {
         let found = match self.target(&state, req, parent.0) {
             Some(Target::Root) => state
                 .user(req.uid())
-                .and_then(|user| Some((user, user.vault(name.to_str()?)?)))
-                .filter(|(_, vault)| vault.exists())
+                .and_then(|user| Some((user, user.vault_for(name.to_str()?, req.pid())?)))
+                .filter(|(_, vault)| vault.seen_by(req.pid()))
                 .map(|(user, vault)| {
                     let ino = Self::node_ino(user, vault, tree::ROOT);
                     self.attr(ino, &Target::VaultDir(user, vault))
@@ -965,7 +1019,7 @@ impl Filesystem for VaultFs {
             Some(Target::Root) => {
                 listing = dots(ROOT, ROOT);
                 if let Some(user) = state.user(req.uid()) {
-                    for vault in user.vaults().filter(|v| v.exists()) {
+                    for vault in user.vaults_for(req.pid()) {
                         let ino = Self::node_ino(user, vault, tree::ROOT);
                         listing.push((ino, FileType::Directory, vault.name.clone().into()));
                     }
@@ -1134,13 +1188,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut user = user_in(dir.path());
         for i in 0..1000 {
-            assert!(user.existing_vault_mut(&format!("made-up-{i}")).is_err());
+            assert!(user.existing_vault_mut(&format!("made-up-{i}"), 1).is_err());
         }
         assert!(user.vaults.is_empty());
         assert!(user.vault_or_new("real").is_ok());
         std::fs::write(dir.path().join("on-disk.pidvault"), b"").unwrap();
         assert!(
-            user.existing_vault_mut("on-disk").is_ok(),
+            user.existing_vault_mut("on-disk", 1).is_ok(),
             "a vault on disk is found"
         );
     }
@@ -1152,7 +1206,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut user = user_in(dir.path());
         for i in 0..1000 {
-            let vault = user.new_ephemeral(&format!("passing-{i}")).unwrap();
+            let vault = user.new_ephemeral(&format!("passing-{i}"), 1).unwrap();
             vault
                 .hold(
                     Unlocked::new(Tree::empty(), Key::generate().unwrap(), Vec::new()),
@@ -1184,10 +1238,10 @@ mod tests {
         let fit = MAX_HELD_PER_USER / MAX_SECRET;
         for i in 0..fit {
             let name = format!("v{i}");
-            let room = user.room_for(&name);
+            let room = user.room_for(&name, 1);
             user.vault_or_new(&name).unwrap().hold(big(), room).unwrap();
         }
-        let room = user.room_for("over");
+        let room = user.room_for("over", 1);
         let err = user
             .vault_or_new("over")
             .unwrap()
@@ -1195,13 +1249,13 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("lock one of them first"), "{err}");
 
-        let room = user.room_for("v0");
+        let room = user.room_for("v0", 1);
         assert!(
             room >= MAX_SECRET - 4096,
             "a held vault is not counted against itself"
         );
         user.vault_or_new("v1").unwrap().open = None;
-        let room = user.room_for("over");
+        let room = user.room_for("over", 1);
         user.vault_or_new("over")
             .unwrap()
             .hold(big(), room)

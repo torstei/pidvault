@@ -92,13 +92,16 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
   `/proc/<pid>/fd`, which is a new open by the caller.
 - Kernel caching is off (zero TTLs, direct I/O), so nothing is served from cache.
 - An ephemeral vault has no passphrase, so it can never be unlocked: only the shell that
-  created it, and its descendants, can see it (`Request::CreateEphemeral`). Export and
-  passwd refuse it, and its name cannot be taken while it exists.
+  created it, and its descendants, see it at all (`fs::VaultState::seen_by`), in the
+  mount and in `status`. Its name is that shell's, so another process cannot take it
+  first or learn that it exists; within the shell it hides a stored vault of the same
+  name (`fs::UserState::vault_for`). Export and passwd refuse it.
 - Evidence: e2e `outsider_sees_an_empty_directory`,
   `outsider_is_refused_while_a_shell_is_unlocked`, `access_ends_when_the_shell_exits`,
   `lock_revokes_access_for_the_shell`, `an_orphaned_unlock_does_not_unlock_its_adopter`,
   `only_unlocked_shells_can_write`,
-  `an_ephemeral_vault_cannot_be_unlocked_exported_or_named_like_another`;
+  `an_ephemeral_vault_cannot_be_unlocked_exported_or_named_like_another`,
+  `shells_have_ephemeral_vaults_of_the_same_name_apart`;
   VM "another process of alice sees nothing", "alice's user services see nothing".
 
 ### C2. Nobody can read a private key, not even an unlocked shell
@@ -273,6 +276,12 @@ Accepted advisories are listed, with reasons, in `deny.toml` and `osv-scanner.to
   on through a pipe, a helper or its environment. A program that reads the secret from
   the vault itself, as ssh does its config, is not exposed: the file cannot be reopened
   (C1).
+- **No limit by program.** Access follows the shell, not the program reading: the daemon
+  cannot see which binary a caller runs, since `/proc/<pid>/exe` of another user's
+  process needs `CAP_SYS_PTRACE`, and a process names itself. Within an unlocked shell an
+  allow-list would not hold either: a process can start the allowed program with
+  `LD_PRELOAD`, trace it as its child, or have it hand the secret on (`bao` sends its
+  token to whatever `BAO_ADDR` says).
 - **RSA timing.** The `rsa` crate's arithmetic is not constant-time (RUSTSEC-2023-0071).
   Signatures are blinded, but a process in an unlocked shell can time many of them;
   Ed25519 is recommended.

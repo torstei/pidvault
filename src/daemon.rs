@@ -303,8 +303,8 @@ fn with_vault<T>(
     let user = state
         .user_mut(peer.uid)
         .context("caller has no passwd entry")?;
-    let room = user.room_for(name);
-    f(user.existing_vault_mut(name)?, room)
+    let room = user.room_for(name, peer.pid);
+    f(user.existing_vault_mut(name, peer.pid)?, room)
 }
 
 /// As `with_vault`, but also for a vault that is about to be created.
@@ -318,7 +318,10 @@ fn with_new_vault<T>(
     let user = state
         .user_mut(peer.uid)
         .context("caller has no passwd entry")?;
-    let room = user.room_for(name);
+    if user.vault_for(name, peer.pid).is_some_and(|v| v.ephemeral) {
+        bail!("this shell has an ephemeral vault `{name}`; lock it first");
+    }
+    let room = user.room_for(name, peer.pid);
     f(user.vault_or_new(name)?, room)
 }
 
@@ -365,9 +368,6 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 contents: key.seal_tree(&tree)?,
             };
             with_new_vault(ctx, &peer, &name, |vault, room| {
-                if vault.ephemeral {
-                    bail!("`{name}` is an ephemeral vault; lock it before using its name");
-                }
                 let replacing = vault.exists();
                 if replacing && vault.unlocked_ancestor(peer.pid).is_none() {
                     bail!("replacing `{name}` {}", needs_unlock(&name));
@@ -465,8 +465,8 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             let user = state
                 .user_mut(peer.uid)
                 .context("caller has no passwd entry")?;
-            let room = user.room_for(&name);
-            let vault = user.new_ephemeral(&name)?;
+            let room = user.room_for_new();
+            let vault = user.new_ephemeral(&name, peer.pid)?;
             vault.hold(Unlocked::new(Tree::empty(), key, Vec::new()), room)?;
             vault.sessions.register(shell, handle, expires);
             let until = match for_secs {
@@ -560,8 +560,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
     let vaults = state
         .user(peer.uid)
         .map(|user| {
-            user.vaults()
-                .filter(|v| v.exists())
+            user.vaults_for(peer.pid)
                 .map(|v| VaultStatus {
                     name: v.name.clone(),
                     unlocked_by: v.unlocked_ancestor(peer.pid),
