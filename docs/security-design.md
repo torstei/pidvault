@@ -91,10 +91,14 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
   through it are checked against the reader, and so is reopening one through
   `/proc/<pid>/fd`, which is a new open by the caller.
 - Kernel caching is off (zero TTLs, direct I/O), so nothing is served from cache.
+- An ephemeral vault has no passphrase, so it can never be unlocked: only the shell that
+  created it, and its descendants, can see it (`Request::CreateEphemeral`). Export and
+  passwd refuse it, and its name cannot be taken while it exists.
 - Evidence: e2e `outsider_sees_an_empty_directory`,
   `outsider_is_refused_while_a_shell_is_unlocked`, `access_ends_when_the_shell_exits`,
   `lock_revokes_access_for_the_shell`, `an_orphaned_unlock_does_not_unlock_its_adopter`,
-  `only_unlocked_shells_can_write`;
+  `only_unlocked_shells_can_write`,
+  `an_ephemeral_vault_cannot_be_unlocked_exported_or_named_like_another`;
   VM "another process of alice sees nothing", "alice's user services see nothing".
 
 ### C2. Nobody can read a private key, not even an unlocked shell
@@ -160,8 +164,11 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
 - Decrypted contents and K live in buffers that are wiped when dropped and before they
   grow (`secret::SecretBuf`); passphrases and protocol lines in self-wiping strings.
   Everything is dropped when a vault's last unlocked shell exits.
+- An ephemeral vault is never written at all (`fs::VaultState::save`) and ends with its
+  shell, its `--for`, a lock or the daemon.
 - Evidence: VM "the daemon's memory is never swapped out", "the daemon holds no
-  capabilities".
+  capabilities"; e2e `an_ephemeral_vault_belongs_to_its_shell_and_is_never_stored`,
+  `locking_an_ephemeral_vault_ends_it_and_its_keys`.
 
 ### C7. No user can deny service to the others
 
@@ -169,11 +176,13 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
   timeout; scrypt runs one at a time across the daemon, at a cost of at most 2^20 whatever
   a supplied file asks for.
 - A vault holds at most 4 MiB, counted as it would be saved, and one user's unlocked
-  vaults at most 16 MiB together. Requests about vaults that do not exist register
-  nothing, so they cannot use up a user's 255 places.
+  vaults at most 16 MiB together, ephemeral ones included. Requests about vaults that do
+  not exist register nothing, and an ephemeral vault that is gone leaves its place to the
+  next, so neither can use up a user's 255 places.
 - Evidence: e2e `the_vault_cannot_grow_past_its_limit`,
   `requests_for_made_up_vaults_cannot_use_up_a_users_places`; unit
-  `a_users_unlocked_vaults_share_one_limit`; VM "four full vaults fit in what one user may
+  `a_users_unlocked_vaults_share_one_limit`,
+  `ephemeral_vaults_that_are_gone_take_no_place`; VM "four full vaults fit in what one user may
   hold", "bob still unlocks while carol holds them".
 
 ### C8. A compromised daemon is contained

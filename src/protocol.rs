@@ -41,6 +41,13 @@ pub enum Request {
         old: Zeroizing<String>,
         new: Zeroizing<String>,
     },
+    /// Creates `vault` in memory only, empty and without a passphrase, for the calling
+    /// shell; with `for_secs`, it ends by itself after that many seconds.
+    CreateEphemeral {
+        vault: String,
+        #[serde(default)]
+        for_secs: Option<u64>,
+    },
     /// With `for_secs`, the unlock ends by itself after that many seconds.
     Unlock {
         vault: String,
@@ -67,6 +74,9 @@ pub struct VaultStatus {
     pub expires_in: Option<u64>,
     /// Shells of the caller's user that have this vault unlocked.
     pub sessions: usize,
+    /// Held in memory only, by the shell that created it.
+    #[serde(default)]
+    pub ephemeral: bool,
     /// Problems worth telling the user about, such as an unreadable agent policy.
     #[serde(default)]
     pub notes: Vec<String>,

@@ -1420,3 +1420,83 @@ fn requests_for_made_up_vaults_cannot_use_up_a_users_places() {
         "status lists only the real vault: {o:?}"
     );
 }
+
+/// An ephemeral vault holds what its shell puts in it, for that shell and what it
+/// starts, never reaches the disk, and is gone once the shell exits; its name is then
+/// free again.
+#[test]
+fn an_ephemeral_vault_belongs_to_its_shell_and_is_never_stored() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let state = f.path("state");
+    let o = f.outsider(&format!(
+        r#""$SV" create --ephemeral bao --for 10m >/dev/null || exit 99
+        printf token > "$PIDVAULT_MOUNT/bao/token"
+        sh -c 'cat "$PIDVAULT_MOUNT/bao/token"' && echo
+        "$SV" status
+        ls -A '{}'/*"#,
+        state.display()
+    ));
+    assert!(o.status.success(), "{o:?}");
+    let out = stdout(&o);
+    assert!(out.starts_with("token\n"), "{out}");
+    assert!(out.contains("\nbao: ephemeral, of shell "), "{out}");
+    assert!(out.contains(" for another 9m"), "{out}");
+    assert!(out.contains("\ndefault: locked here"), "{out}");
+    assert!(!out.contains("bao.pidvault"), "{out}");
+
+    let after = f.outsider("cat \"$PIDVAULT_MOUNT/bao/token\"; \"$SV\" status");
+    assert!(!stdout(&after).contains("token"), "{after:?}");
+    assert!(!stdout(&after).contains("bao"), "{after:?}");
+    let again = f.outsider("\"$SV\" create --ephemeral bao");
+    assert!(again.status.success(), "{again:?}");
+}
+
+/// An ephemeral vault has no passphrase, so nothing can unlock, export or re-key it,
+/// and it cannot take the name of another vault.
+#[test]
+fn an_ephemeral_vault_cannot_be_unlocked_exported_or_named_like_another() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let o = f.outsider(&format!(
+        r#""$SV" create --ephemeral tmp >/dev/null || exit 99
+        sh -c 'echo "{PASSPHRASE}" | "$SV" unlock tmp --passphrase-stdin' && echo unlocked
+        echo "{PASSPHRASE}" | "$SV" export --vault tmp --passphrase-stdin - >/dev/null && echo exported
+        printf '%s\n%s\n' "{PASSPHRASE}" "{PASSPHRASE}" | "$SV" passwd tmp --passphrase-stdin && echo rekeyed
+        "$SV" create --ephemeral tmp && echo twice
+        "$SV" create --ephemeral default && echo shadowed
+        true"#
+    ));
+    assert!(o.status.success(), "{o:?}");
+    assert_eq!(stdout(&o), "", "{o:?}");
+    let err = stderr_of(&o);
+    for expected in [
+        "`tmp` is ephemeral: only the shell that created it",
+        "`tmp` is ephemeral: it has no passphrase and cannot be exported",
+        "`tmp` is ephemeral and has no passphrase",
+        "you already have a vault `tmp`",
+        "you already have a vault `default`",
+    ] {
+        assert!(err.contains(expected), "missing {expected:?} in {err}");
+    }
+}
+
+/// Keys in an ephemeral vault sign through the agent like any other until it is locked,
+/// which ends the vault.
+#[test]
+fn locking_an_ephemeral_vault_ends_it_and_its_keys() {
+    let Some(f) = Fixture::start_empty() else {
+        return;
+    };
+    let o = f.outsider(
+        r#""$SV" create --ephemeral certs >/dev/null || exit 99
+        ssh-keygen -q -t ed25519 -N '' -C short-lived -f "$PIDVAULT_MOUNT/certs/id_ed25519"
+        SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l | grep -c short-lived
+        "$SV" lock certs >/dev/null
+        SSH_AUTH_SOCK="$PIDVAULT_AGENT_SOCKET" ssh-add -l | grep -c short-lived
+        ls "$PIDVAULT_MOUNT""#,
+    );
+    assert_eq!(stdout(&o), "1\n0\n", "{o:?}");
+}
