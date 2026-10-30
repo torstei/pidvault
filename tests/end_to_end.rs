@@ -1476,7 +1476,7 @@ fn an_ephemeral_vault_cannot_be_unlocked_exported_or_named_like_another() {
         "`tmp` is ephemeral: only the shell that created it",
         "`tmp` is ephemeral: it has no passphrase and cannot be exported",
         "`tmp` is ephemeral and has no passphrase",
-        "you already have a vault `tmp`",
+        "this shell already has an ephemeral vault `tmp`",
         "you already have a vault `default`",
     ] {
         assert!(err.contains(expected), "missing {expected:?} in {err}");
@@ -1499,4 +1499,49 @@ fn locking_an_ephemeral_vault_ends_it_and_its_keys() {
         ls "$PIDVAULT_MOUNT""#,
     );
     assert_eq!(stdout(&o), "1\n0\n", "{o:?}");
+}
+
+/// Ephemeral vaults are named per shell: two shells each have their own `bao`, at the
+/// same path, and neither they nor any other process see the other's.
+#[test]
+fn shells_have_ephemeral_vaults_of_the_same_name_apart() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let mut first = f
+        .command("bash")
+        .args([
+            "-c",
+            r#""$SV" create --ephemeral bao >/dev/null || exit 99
+            printf first > "$PIDVAULT_MOUNT/bao/token"
+            echo ready
+            read -r _
+            cat "$PIDVAULT_MOUNT/bao/token"; echo
+            "$SV" status | grep -c '^bao:'"#,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first_out = BufReader::new(first.stdout.take().unwrap());
+    let mut line = String::new();
+    first_out.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+
+    let second = f.outsider(
+        r#""$SV" create --ephemeral bao >/dev/null || exit 99
+        printf second > "$PIDVAULT_MOUNT/bao/token"
+        cat "$PIDVAULT_MOUNT/bao/token"; echo
+        "$SV" status | grep -c '^bao:'"#,
+    );
+    let outsider = f.outsider("ls \"$PIDVAULT_MOUNT\"; \"$SV\" status | grep -c '^bao:'");
+
+    writeln!(first.stdin.take().unwrap()).unwrap();
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut first_out, &mut rest).unwrap();
+    assert!(first.wait().unwrap().success());
+
+    assert_eq!(rest, "first\n1\n");
+    assert_eq!(stdout(&second), "second\n1\n", "{second:?}");
+    assert_eq!(stdout(&outsider), "default\n0\n", "{outsider:?}");
 }

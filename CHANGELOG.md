@@ -4,7 +4,8 @@
 
 - Ephemeral vaults: `pidvault create --ephemeral NAME [--for 8h]` makes a vault that is
   held in memory only, without a passphrase, for the calling shell and what it starts.
-  It is gone when the shell exits or locks it, when `--for` runs out, or when the daemon
+  Its name is the shell's own: other shells can each have a vault of that name, and see
+  none but their own. It is gone when the shell exits or locks it, when `--for` runs out, or when the daemon
   stops; nothing of it is written to disk. For tokens you can get again by logging in,
   such as bao's with `BAO_TOKEN_PATH`, and short-lived SSH certificates.
 
