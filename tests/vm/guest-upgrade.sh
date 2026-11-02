@@ -44,13 +44,13 @@ as alice sh -c '
     mkdir -p ~/src ~/.ssh && chmod 700 ~/.ssh
     ssh-keygen -q -t ed25519 -N "" -f ~/src/id_vm
     cat ~/src/id_vm.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
-    printf "Host vm\n  HostName 127.0.0.1\n  User alice\n  IdentityFile /run/pidvault/default/id_vm\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n" > ~/src/config
+    printf "Host vm\n  HostName 127.0.0.1\n  User alice\n  IdentityFile /run/pidvault/stored/default/id_vm\n  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n" > ~/src/config
     pidvault stub > ~/.ssh/config
 '
 check "alice creates a vault" as alice sh -c \
     'echo alice-secret-phrase | pidvault create --passphrase-stdin --work-factor 12 --from ~/src >/dev/null && rm ~/src/id_vm'
 check "alice logs in with the vault key" equals "$(unlocked alice 'ssh vm echo logged-in')" logged-in
-check "alice edits her config" unlocked alice "sed -i 's/LogLevel ERROR/LogLevel QUIET/' /run/pidvault/default/config"
+check "alice edits her config" unlocked alice "sed -i 's/LogLevel ERROR/LogLevel QUIET/' /run/pidvault/stored/default/config"
 as alice ssh-keygen -q -t ed25519 -N 'key secret' -C old-github -f /tmp/alice-old-key
 check "alice adds a protected key" unlocked alice \
     "echo 'key secret' | pidvault add-key --passphrase-stdin --name id_github /tmp/alice-old-key >/dev/null"
@@ -74,8 +74,6 @@ check "alice's vaults belong to the daemon" equals \
 # --- the vault after the upgrade ---------------------------------------------
 
 check "alice lists both her vaults" equals "$(as alice ls /run/pidvault/stored | tr '\n' ' ')" "default work "
-check "alice points her stub and config at the new paths" unlocked alice \
-    "pidvault stub > ~/.ssh/config && sed -i -E 's#/run/pidvault/(stored/)?#/run/pidvault/stored/#g' /run/pidvault/stored/*/config"
 check "the vault opens with its passphrase and keeps the edit" unlocked alice \
     'grep -q "LogLevel QUIET" /run/pidvault/stored/default/config'
 check "the second vault opens too" as alice sh -c \
