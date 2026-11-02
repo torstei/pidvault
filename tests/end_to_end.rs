@@ -448,6 +448,12 @@ fn ssh_config_resolution_depends_on_the_shell() {
     let query = format!("ssh -G -F {} x | grep '^user '", stub.display());
     assert_eq!(stdout(&f.unlocked_shell(&query)), "user fromvault\n");
     assert_eq!(stdout(&f.outsider(&query)), "user fallback\n");
+    let ephemeral_only = format!(
+        r#""$SV" create --ephemeral bao >/dev/null || exit 99
+        printf 'Host x\n  User fromephemeral\n' > "$PIDVAULT_MOUNT/ephemeral/bao/config"
+        {query}"#
+    );
+    assert_eq!(stdout(&f.outsider(&ephemeral_only)), "user fallback\n");
 }
 
 struct Sshd {
@@ -1564,4 +1570,39 @@ fn shells_have_ephemeral_vaults_of_the_same_name_apart() {
     assert_eq!(rest, "first\n1\n");
     assert_eq!(stdout(&second), "second\n1\n", "{second:?}");
     assert_eq!(stdout(&outsider), "default\n0\n", "{outsider:?}");
+}
+
+/// `match` answers ssh's `Match exec` by the calling shell's unlocked vaults alone, and
+/// every condition given must hold for one of them.
+#[test]
+fn match_counts_only_the_shells_unlocked_vaults_that_meet_every_condition() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let probe = r#"for args in "" "--kind stored" "--kind ephemeral" "--name default" "--name bao" "--with-keys" "--kind ephemeral --with-keys"; do
+            "$SV" match $args; printf '%s ' $?
+        done"#;
+
+    assert_eq!(stdout(&f.outsider(probe)), "1 1 1 1 1 1 1 ");
+    assert_eq!(stdout(&f.unlocked_shell(probe)), "0 0 1 0 1 1 1 ");
+
+    let ephemeral = f.outsider(&format!(
+        r#""$SV" create --ephemeral bao >/dev/null || exit 99
+        printf token > "$PIDVAULT_MOUNT/ephemeral/bao/token"
+        {probe}
+        echo
+        ssh-keygen -q -t ed25519 -N '' -f "$PIDVAULT_MOUNT/ephemeral/bao/id_cert" || exit 98
+        {probe}"#
+    ));
+    assert_eq!(
+        stdout(&ephemeral),
+        "0 1 0 1 0 1 1 \n0 1 0 1 0 0 0 ",
+        "{ephemeral:?}"
+    );
+
+    let gone = f.outsider(&format!(
+        "PIDVAULT_SOCKET={} \"$SV\" match; echo $?",
+        f.path("nowhere.sock").display()
+    ));
+    assert_eq!(stdout(&gone), "2\n");
 }

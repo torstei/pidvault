@@ -79,6 +79,9 @@ pub struct VaultStatus {
     /// Held in memory only, by the shell that created it.
     #[serde(default)]
     pub ephemeral: bool,
+    /// Private keys in the vault, when the caller's shell has it unlocked.
+    #[serde(default)]
+    pub keys: usize,
     /// Problems worth telling the user about, such as an unreadable agent policy.
     #[serde(default)]
     pub notes: Vec<String>,
