@@ -284,6 +284,35 @@ the vault themselves, as bao does here. A program that hands it on, through a pi
 helper program or an environment variable, gives it away: any of your processes can
 read another's pipes and environment through `/proc`.
 
+### The Azure CLI
+
+`az` keeps its refresh tokens in plain files under `~/.azure`, readable by every process
+you run. Give it a vault of its own and point its whole configuration directory there:
+
+```sh
+pidvault create azure
+export AZURE_CONFIG_DIR=/run/pidvault/stored/azure      # in ~/.bashrc
+az config set core.collect_telemetry=false logging.enable_log_file=false
+az login
+```
+
+Move the directory, not a symlink to the token cache: `az logout` deletes the cache file,
+and the next `az login` would then write a new one under `~/.azure`. In a shell without
+the vault az stops with a `PermissionError` on that directory and writes nothing elsewhere.
+Turning off telemetry and the log files keeps the vault far below its 4 MiB, and
+`AZURE_EXTENSION_DIR` can keep extensions out of it, though anything there runs in a
+process that holds your tokens.
+
+Log in afresh rather than copying the old cache in, then delete `~/.azure/msal_token_cache.json`
+and `service_principal_entries.json`; `az logout` revokes nothing, so sign out
+everywhere in your Microsoft account to end what they held.
+
+`az account get-access-token` refreshes an access token with the refresh token, inside
+the vault, and prints it. A program that reads it through a pipe hands it to your other
+processes for its hour or so of life, as with any pipe; the refresh token stays in the
+vault. A token broker serving tokens on a socket to any of your processes undoes the
+point of the vault.
+
 ### Backups and moving to another machine
 
 ```sh
