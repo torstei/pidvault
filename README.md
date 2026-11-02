@@ -310,8 +310,7 @@ everywhere in your Microsoft account to end what they held.
 `az account get-access-token` refreshes an access token with the refresh token, inside
 the vault, and prints it. A program that reads it through a pipe hands it to your other
 processes for its hour or so of life, as with any pipe; the refresh token stays in the
-vault. A token broker serving tokens on a socket to any of your processes undoes the
-point of the vault.
+vault.
 
 ### Backups and moving to another machine
 
