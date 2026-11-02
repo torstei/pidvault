@@ -136,19 +136,26 @@ the clean move is to generate new ones straight into the vault, e.g.
 `pidvault stub` prints a block that must sit at the top of `~/.ssh/config`:
 
 ```
-Match exec "/usr/bin/pidvault status --quiet"
+Match exec "/usr/bin/pidvault match --kind stored"
     IdentityAgent /run/pidvault-agent.sock
     AddKeysToAgent no
     Include /run/pidvault/stored/*/config /run/pidvault/ephemeral/*/config
 ```
 
-In a shell with a vault unlocked, the vaults' entries take precedence and ssh signs
+In a shell with a stored vault unlocked, the vaults' entries take precedence and ssh signs
 through the vault agent, never handing a key to any other agent whatever a later
 `AddKeysToAgent yes` says. Everywhere else the block does nothing and your existing
 config applies as before, so you can migrate one host at a time. `~/.ssh` itself,
 `authorized_keys` and inbound SSH are untouched. Shells with a vault unlocked do not use
 your desktop agent, so a key you still keep there works only in other shells until you
 move it into a vault.
+
+`pidvault match` decides which shells that is: it succeeds when the shell has an unlocked
+vault meeting every condition given, `--kind stored|ephemeral`, `--name NAME` and
+`--with-keys`, and with none, any unlocked vault. `--kind stored` leaves a shell holding
+only an ephemeral token vault to your usual agent and config; `--with-keys` would also
+take in ephemeral vaults with SSH certificates; `--name work` limits the block to one
+vault.
 
 If that block is more magic than you want in `~/.ssh/config`, leave it out and name the
 vault's config yourself: `ssh -F /run/pidvault/stored/default/config HOST`. A new vault's
@@ -269,7 +276,8 @@ path, and `BAO_TOKEN_PATH` can be set once in `~/.bashrc`; in a shell without on
 finds no token. `status` shows it as `ephemeral/bao`, and `pidvault lock --ephemeral bao`
 ends it. It is gone when that shell exits or locks it, when `--for` runs out, or when the
 daemon stops. Keys in it sign through the agent like any other, which suits short-lived
-SSH certificates.
+SSH certificates; for ssh to use them in a shell without a stored vault, make the stub's
+`Match exec` run `pidvault match --with-keys`.
 
 A secret in a vault is safe from your other processes only while programs read it from
 the vault themselves, as bao does here. A program that hands it on, through a pipe, a

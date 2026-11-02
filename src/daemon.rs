@@ -562,6 +562,11 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                         .map(|at| at.saturating_duration_since(Instant::now()).as_secs()),
                     sessions: v.sessions.len(),
                     ephemeral: v.ephemeral,
+                    keys: v
+                        .open
+                        .as_ref()
+                        .filter(|_| v.unlocked_ancestor(peer.pid).is_some())
+                        .map_or(0, |open| open.tree.keys().len()),
                     notes: v
                         .open
                         .as_ref()

@@ -4,6 +4,11 @@
 
 - `status` and the prompt marker name stored vaults as `stored/NAME`, as they appear
   under the mount, beside `ephemeral/NAME`.
+- `pidvault match [--kind stored|ephemeral] [--name NAME] [--with-keys]` tells ssh's
+  `Match exec` whether the calling shell has an unlocked vault meeting those conditions.
+  The stub now uses `match --kind stored`, so a shell holding only an ephemeral vault,
+  such as a bao token, keeps your usual agent and config. Run `pidvault stub` again to
+  get it; the old `status --quiet` line still works as before.
 
 ## 0.5.0 - 2026-10-30
 

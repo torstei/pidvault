@@ -170,11 +170,31 @@ enum Command {
         #[arg(long)]
         passphrase_stdin: bool,
     },
+    /// Exit 0 if the calling shell has an unlocked vault that meets every condition
+    /// given, else 1 (2 if the daemon cannot be reached); prints nothing. For ssh's
+    /// `Match exec`
+    Match {
+        /// Count only vaults of this kind
+        #[arg(long)]
+        kind: Option<Kind>,
+        /// Count only vaults of this name
+        #[arg(long)]
+        name: Option<String>,
+        /// Count only vaults with a private key in them
+        #[arg(long)]
+        with_keys: bool,
+    },
     /// Print the lines to put at the top of ~/.ssh/config
     Stub,
     /// Print bash code that marks shells with a vault unlocked, in the prompt and the
     /// terminal title; use it with `eval "$(pidvault shell-init)"` in ~/.bashrc
     ShellInit,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Kind {
+    Stored,
+    Ephemeral,
 }
 
 fn main() -> ExitCode {
@@ -513,6 +533,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
+        Command::Match {
+            kind,
+            name,
+            with_keys,
+        } => {
+            let Ok(reply) = protocol::call(&cli.socket, &Request::Status) else {
+                return Ok(ExitCode::from(2));
+            };
+            let found = reply.vaults.iter().any(|v| {
+                v.unlocked_by.is_some()
+                    && kind.is_none_or(|k| v.ephemeral == matches!(k, Kind::Ephemeral))
+                    && name.as_ref().is_none_or(|n| *n == v.name)
+                    && (!with_keys || v.keys > 0)
+            });
+            Ok(if found {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
         Command::Stub => {
             println!("{}", stub(&cli.mount, &cli.agent_socket)?);
             Ok(ExitCode::SUCCESS)
@@ -688,10 +728,11 @@ fn shell_init(exe: &Path) -> String {
 fn stub(mount: &Path, agent_socket: &Path) -> Result<String> {
     let exe = std::env::current_exe().context("cannot tell where pidvault is installed")?;
     Ok(format!(
-        "# pidvault: keep this block above every Host and Match block. In a shell with a vault\n\
-         # unlocked, vault entries take precedence, vault keys sign through the vault agent,\n\
-         # and no key is handed to any other agent.\n\
-         Match exec \"{} status --quiet\"\n\
+        "# pidvault: keep this block above every Host and Match block. In a shell with a stored\n\
+         # vault unlocked, vault entries take precedence, vault keys sign through the vault agent,\n\
+         # and no key is handed to any other agent. `match --with-keys` counts any vault with\n\
+         # a key in it, ephemeral ones too; `match` alone counts every vault.\n\
+         Match exec \"{} match --kind stored\"\n\
          \x20   IdentityAgent {}\n\
          \x20   AddKeysToAgent no\n\
          \x20   Include {} {}",

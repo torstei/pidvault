@@ -52,6 +52,9 @@ Make an exported vault yours and unlock it for the calling shell: on a new machi
 pidvault\-add\-key(1)
 Copy a private key into a vault, removing its passphrase on the way; the vault must be unlocked in the calling shell
 .TP
+pidvault\-match(1)
+Exit 0 if the calling shell has an unlocked vault that meets every condition given, else 1 (2 if the daemon cannot be reached); prints nothing. For ssh\*(Aqs `Match exec`
+.TP
 pidvault\-stub(1)
 Print the lines to put at the top of ~/.ssh/config
 .TP
