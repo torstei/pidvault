@@ -60,7 +60,13 @@ to get right:
   can act as it, so `unlock` refuses unless `kernel.yama.ptrace_scope` is at least 1
   (Ubuntu's default); even then the shell's ancestors, such as the terminal emulator, can.
   On X11, any program on your display can read the passphrase as you type it.
-- **Root.** Anything that is, or can become, root is out of scope.
+- **Root.** Anything that is, or can become, root is out of scope. That includes every
+  process of yours when you are in the `docker` group, as most developers are: one
+  `docker run --privileged --pid=host` makes it root. The groups `lxd`, `libvirt` and
+  `disk`, and `sudo` without a password, do the same. Rootless Docker and Podman do not:
+  their containers have only your own powers, and are not started by your shell, so the
+  vaults stay closed to them. In the `docker` group pidvault still keeps your secrets from
+  programs that read the files they know, but not from one that sets out to get past it.
 
 The full list, with what each guarantee rests on, is in
 [docs/security-design.md](docs/security-design.md).
@@ -311,6 +317,22 @@ everywhere in your Microsoft account to end what they held.
 the vault, and prints it. A program that reads it through a pipe hands it to your other
 processes for its hour or so of life, as with any pipe; the refresh token stays in the
 vault.
+
+### Docker
+
+`docker login` keeps registry passwords and tokens in `~/.docker/config.json`, base64
+but otherwise plain. Move the whole directory into a vault, and keep the builder state,
+which is not secret and grows, outside it:
+
+```sh
+export DOCKER_CONFIG=/run/pidvault/stored/docker        # in ~/.bashrc
+export BUILDX_CONFIG=~/.docker/buildx
+```
+
+`az acr login` runs `docker login`, so its tokens land in the vault too. In a shell
+without the vault docker runs without credentials: public images pull as before, and
+nothing is written under `~/.docker`. Being in the `docker` group is another matter; see
+[What it does not do](#what-it-does-not-do).
 
 ### Backups and moving to another machine
 
