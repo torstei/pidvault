@@ -13,7 +13,7 @@ use fuser::{
 };
 
 use crate::keys;
-use crate::procs::{self, Pidfd};
+use crate::procs::{self, Liveness, Pidfd};
 use crate::secret::MAX_SECRET;
 use crate::sessions::Sessions;
 use crate::tree::{self, Kind, Node, Tree, TreeError};
@@ -120,6 +120,14 @@ pub struct VaultState {
 impl VaultState {
     pub fn unlocked_ancestor(&self, pid: u32) -> Option<u32> {
         self.sessions.unlocked_ancestor(pid, procs::parent_of)
+    }
+
+    /// As `unlocked_ancestor` for `pid`, the process `process` refers to. Its liveness is
+    /// checked after the walk up from `pid`, so the answer cannot be about another
+    /// process that has been given the same pid since.
+    pub fn shell_of(&self, pid: u32, process: &impl Liveness) -> Option<u32> {
+        let shell = self.unlocked_ancestor(pid)?;
+        (!process.has_exited()).then_some(shell)
     }
 
     fn visible(&self, pid: u32) -> Option<&Unlocked> {
@@ -1242,6 +1250,23 @@ mod tests {
             user.existing_vault_mut("on-disk").is_ok(),
             "a vault on disk is found"
         );
+    }
+
+    /// A pid is the asking process's only while that process is alive: once it is gone,
+    /// the shell its pid leads to is no answer, since the pid may be another's by now.
+    #[test]
+    fn a_shell_found_for_a_process_that_is_gone_does_not_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut user = user_in(dir.path());
+        let me = std::process::id();
+        let vault = user.vault_or_new("v").unwrap();
+        vault.sessions.register(me, Pidfd::open(me).unwrap(), None);
+
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let gone = Pidfd::open(child.id()).unwrap();
+        child.wait().unwrap();
+        assert_eq!(vault.shell_of(me, &gone), None);
+        assert_eq!(vault.shell_of(me, &Pidfd::open(me).unwrap()), Some(me));
     }
 
     /// Ephemeral vaults come and go under any name; one that is gone leaves its place to

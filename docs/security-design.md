@@ -228,7 +228,7 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
 |---|---|
 | Memory safety (CWE-119 and family) | Rust. Every `unsafe` block states why it is sound, enforced by clippy's `undocumented_unsafe_blocks` |
 | Path traversal (CWE-22) | Vault names are restricted; tar paths must be normal components |
-| PID reuse, TOCTOU (CWE-367) | Shells and agent peers are held by pidfd; the calling shell is re-checked after its pidfd is opened |
+| PID reuse, TOCTOU (CWE-367) | Shells, and the peers of both sockets, are held by pidfd; the calling shell is re-checked after its pidfd is opened, and a shell found from a peer's pid counts only if the peer is still alive after the walk (`fs::VaultState::shell_of`) |
 | Uncontrolled resource use (CWE-400) | The limits of C7 |
 | Timing side channels (CWE-208) | ECDSA with constant-time arithmetic; RSA signing blinded; K compared in constant time |
 | Weak crypto (CWE-327) | No own cryptography; no SHA-1 signatures; see below |

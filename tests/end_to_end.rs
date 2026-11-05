@@ -1690,6 +1690,24 @@ fn a_vault_is_deleted_only_from_a_shell_that_has_it_unlocked() {
     assert!(!file.exists());
 }
 
+/// An ephemeral vault may share its name with a stored one; deleting it leaves the
+/// stored vault and its file alone.
+#[test]
+fn deleting_an_ephemeral_vault_spares_the_stored_one_of_its_name() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let file = f.path(&format!("state/{}/default.pidvault", uid()));
+    let o = f.unlocked_shell(
+        r#""$SV" create --ephemeral default >/dev/null || exit 99
+        "$SV" delete --ephemeral default --yes || exit 98
+        cat "$MNT/config""#,
+    );
+    assert!(o.status.success(), "{o:?}");
+    assert_eq!(stdout(&o), format!("vault `default` deleted\n{CONFIG}"));
+    assert!(file.exists());
+}
+
 #[test]
 fn deleting_an_ephemeral_vault_ends_it() {
     let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
