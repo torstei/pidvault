@@ -98,12 +98,18 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
   `/run/pidvault/stored`, and every request names its kind (`fs::UserState::vault_in`),
   so neither kind can stand in for the other; unlock, export and passwd know only
   stored vaults.
+- Destroying a vault needs the same: `delete`, like an import that replaces a vault,
+  is refused to a caller that does not have it unlocked. It removes the file and the copy
+  an import keeps under the state lock, then drops the tree held in memory, so a pending
+  save cannot bring it back (`fs::VaultState::delete`).
 - Evidence: e2e `outsider_sees_an_empty_directory`,
   `outsider_is_refused_while_a_shell_is_unlocked`, `access_ends_when_the_shell_exits`,
   `lock_revokes_access_for_the_shell`, `an_orphaned_unlock_does_not_unlock_its_adopter`,
   `only_unlocked_shells_can_write`,
   `ephemeral_and_stored_vaults_are_apart`,
-  `shells_have_ephemeral_vaults_of_the_same_name_apart`;
+  `shells_have_ephemeral_vaults_of_the_same_name_apart`,
+  `a_vault_is_deleted_only_from_a_shell_that_has_it_unlocked`,
+  `deleting_a_vault_leaves_nothing_behind`;
   VM "another process of alice sees nothing", "alice's user services see nothing".
 
 ### C2. Nobody can read a private key, not even an unlocked shell

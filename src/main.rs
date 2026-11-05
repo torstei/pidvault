@@ -1,4 +1,4 @@
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -10,7 +10,7 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
-use pidvault::protocol::{Request, Response, VaultStatus};
+use pidvault::protocol::{Request, Response};
 use pidvault::{daemon, fs, keys, procs, protocol, secret, tree, vault};
 
 /// Per-shell access to an encrypted SSH configuration directory.
@@ -111,6 +111,17 @@ enum Command {
         /// Revoke access for all of your shells
         #[arg(long)]
         all: bool,
+    },
+    /// Delete a vault and everything in it, for good; it must be unlocked in the calling
+    /// shell
+    Delete {
+        vault: String,
+        /// The vault is this shell's ephemeral one, not a stored one
+        #[arg(long)]
+        ephemeral: bool,
+        /// Do not ask to confirm by typing the vault's name
+        #[arg(long)]
+        yes: bool,
     },
     /// Show your vaults; exit 0 if the calling shell has the vault (or any) unlocked
     Status {
@@ -349,6 +360,38 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     passphrase,
                     for_secs: for_.map(|d| d.as_secs()),
                 },
+            )?)
+        }
+        Command::Delete {
+            vault,
+            ephemeral,
+            yes,
+        } => {
+            let shown = shown_name(ephemeral, &vault);
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    bail!("not deleting `{shown}` without a terminal to confirm on; add --yes");
+                }
+                let reply = protocol::call(&cli.socket, &Request::Status)?;
+                match reply.vault_in(ephemeral, &vault) {
+                    None => bail!("you have no vault `{shown}`"),
+                    Some(v) if v.unlocked_by.is_none() => bail!(
+                        "deleting `{vault}` needs it unlocked in this shell; run `pidvault unlock {vault}` first"
+                    ),
+                    Some(_) => {}
+                }
+                eprint!(
+                    "This deletes {shown} and everything in it, for good. Type its name to go on: "
+                );
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                if answer.trim_end_matches('\n') != vault {
+                    bail!("`{shown}` not deleted");
+                }
+            }
+            report(protocol::call(
+                &cli.socket,
+                &Request::Delete { vault, ephemeral },
             )?)
         }
         Command::Lock {
@@ -627,7 +670,7 @@ fn print_status(reply: &Response) {
         match vault.unlocked_by {
             Some(shell) if vault.ephemeral => println!(
                 "{}: of shell {shell}{}, in memory only",
-                shown_name(vault),
+                shown_name(vault.ephemeral, &vault.name),
                 vault
                     .expires_in
                     .map(|secs| format!(" for another {}", daemon::format_duration(secs)))
@@ -635,7 +678,7 @@ fn print_status(reply: &Response) {
             ),
             Some(shell) => println!(
                 "{}: unlocked by shell {shell}{} ({} of your shells have it unlocked)",
-                shown_name(vault),
+                shown_name(vault.ephemeral, &vault.name),
                 vault
                     .expires_in
                     .map(|secs| format!(" for another {}", daemon::format_duration(secs)))
@@ -644,7 +687,7 @@ fn print_status(reply: &Response) {
             ),
             None => println!(
                 "{}: locked here ({} of your other shells have it unlocked)",
-                shown_name(vault),
+                shown_name(vault.ephemeral, &vault.name),
                 vault.sessions
             ),
         }
@@ -656,13 +699,9 @@ fn print_status(reply: &Response) {
 
 /// A vault with the directory of its kind, `stored/NAME` or `ephemeral/NAME`, as it
 /// appears under the mount.
-fn shown_name(vault: &VaultStatus) -> String {
-    let kind = if vault.ephemeral {
-        fs::EPHEMERAL
-    } else {
-        fs::STORED
-    };
-    format!("{kind}/{}", vault.name)
+fn shown_name(ephemeral: bool, name: &str) -> String {
+    let kind = if ephemeral { fs::EPHEMERAL } else { fs::STORED };
+    format!("{kind}/{name}")
 }
 
 /// The vaults the calling shell has unlocked, each with the time it has left, e.g.
@@ -676,8 +715,12 @@ fn prompt_line(reply: &Response, only: Option<(bool, &str)>) -> String {
                 && only.is_none_or(|(ephemeral, name)| v.ephemeral == ephemeral && v.name == name)
         })
         .map(|v| match v.expires_in {
-            Some(secs) => format!("{} {}", shown_name(v), short_duration(secs)),
-            None => shown_name(v),
+            Some(secs) => format!(
+                "{} {}",
+                shown_name(v.ephemeral, &v.name),
+                short_duration(secs)
+            ),
+            None => shown_name(v.ephemeral, &v.name),
         })
         .collect::<Vec<_>>()
         .join(", ")
