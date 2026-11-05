@@ -184,7 +184,8 @@ Inside the vault, refer to files through the mount, e.g.
 left. Once no shell has a vault unlocked, its decrypted contents and key leave memory.
 
 Other commands: `pidvault status`, `pidvault lock` (this shell) and `pidvault lock --all`
-(every shell), and `pidvault passwd` to change a passphrase.
+(every shell), `pidvault passwd` to change a passphrase, and `pidvault delete NAME` to
+delete a vault for good, from a shell that has it unlocked, after you type its name.
 
 To see which shells have a vault unlocked, put this at the end of `~/.bashrc`:
 

@@ -1606,3 +1606,103 @@ fn match_counts_only_the_shells_unlocked_vaults_that_meet_every_condition() {
     ));
     assert_eq!(stdout(&gone), "2\n");
 }
+
+/// Deleting a vault takes its file, the copy an import keeps and what is held in memory,
+/// so that a change not yet saved cannot bring it back; its name is free again after.
+#[test]
+fn deleting_a_vault_leaves_nothing_behind() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let file = f.path(&format!("state/{}/default.pidvault", uid()));
+    let previous = f.path(&format!("state/{}/default.pidvault.previous", uid()));
+    std::fs::copy(&file, &previous).unwrap();
+
+    let o = f.unlocked_shell(
+        r#"echo '# unsaved' >> "$MNT/config"
+        "$SV" delete default --yes || exit 98
+        sleep 1.5
+        cat "$MNT/config" 2>/dev/null && echo still-readable
+        "$SV" status
+        true"#,
+    );
+    assert!(o.status.success(), "{o:?}");
+    let out = stdout(&o);
+    assert!(out.starts_with("vault `default` deleted\n"), "{out}");
+    assert!(!out.contains("still-readable"), "{out}");
+    assert!(!out.contains("stored/default"), "{out}");
+    assert!(!file.exists() && !previous.exists());
+
+    let again = f.outsider(&format!(
+        r#"echo '{PASSPHRASE}' | "$SV" create --passphrase-stdin --work-factor 10 >/dev/null || exit 97
+        ls -A "$MNT""#
+    ));
+    assert!(again.status.success(), "{again:?}");
+    assert_eq!(stdout(&again), "config\n");
+}
+
+/// Only a shell that has the vault unlocked deletes it, and only when told twice.
+#[test]
+fn a_vault_is_deleted_only_from_a_shell_that_has_it_unlocked() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let file = f.path(&format!("state/{}/default.pidvault", uid()));
+
+    let outsider = f.outsider("\"$SV\" delete default --yes");
+    assert!(!outsider.status.success());
+    assert!(
+        stderr_of(&outsider).contains("unlocked in this shell"),
+        "{outsider:?}"
+    );
+
+    let unconfirmed = f.unlocked_shell("\"$SV\" delete default");
+    assert!(!unconfirmed.status.success());
+    assert!(
+        stderr_of(&unconfirmed).contains("add --yes"),
+        "{unconfirmed:?}"
+    );
+
+    let unknown = f.unlocked_shell("\"$SV\" delete nosuch --yes");
+    assert!(
+        stderr_of(&unknown).contains("no vault `stored/nosuch`"),
+        "{unknown:?}"
+    );
+
+    let wrong_kind = f.unlocked_shell("\"$SV\" delete default --ephemeral --yes");
+    assert!(
+        stderr_of(&wrong_kind).contains("no vault `ephemeral/default`"),
+        "{wrong_kind:?}"
+    );
+
+    let typed = |name: &str| {
+        f.unlocked_shell(&format!(
+            "echo {name} | script -qec '\"$SV\" delete default' /dev/null"
+        ))
+    };
+    let mistyped = typed("defualt");
+    assert!(!mistyped.status.success(), "{mistyped:?}");
+    assert!(file.exists());
+    assert_eq!(stdout(&f.unlocked_shell("cat \"$MNT/config\"")), CONFIG);
+
+    let confirmed = typed("default");
+    assert!(confirmed.status.success(), "{confirmed:?}");
+    assert!(!file.exists());
+}
+
+#[test]
+fn deleting_an_ephemeral_vault_ends_it() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let o = f.outsider(
+        r#""$SV" create --ephemeral bao >/dev/null || exit 99
+        printf token > "$PIDVAULT_MOUNT/ephemeral/bao/token"
+        "$SV" delete bao --yes 2>/dev/null && echo deleted-stored
+        "$SV" delete --ephemeral bao --yes || exit 98
+        cat "$PIDVAULT_MOUNT/ephemeral/bao/token" 2>/dev/null && echo still-readable
+        "$SV" create --ephemeral bao >/dev/null && ls -A "$PIDVAULT_MOUNT/ephemeral/bao""#,
+    );
+    assert!(o.status.success(), "{o:?}");
+    assert_eq!(stdout(&o), "vault `bao` deleted\n");
+}

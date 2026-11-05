@@ -159,6 +159,17 @@ impl VaultState {
         Ok(())
     }
 
+    /// Ends the vault for good: every unlock of it, what is held in memory and, for a
+    /// stored one, its file; a vault whose file cannot be removed stays as it was.
+    pub fn delete(&mut self) -> Result<()> {
+        if !self.ephemeral {
+            crate::vault::remove(&self.path)?;
+        }
+        self.sessions.clear();
+        self.open = None;
+        Ok(())
+    }
+
     fn mark_changed(&mut self) {
         if let Some(open) = &mut self.open {
             open.changed = Some(Instant::now());
@@ -306,6 +317,20 @@ impl UserState {
             self.stored_index(name)
         }?;
         Some(&self.vaults[index])
+    }
+
+    pub fn vault_in_mut(
+        &mut self,
+        ephemeral: bool,
+        name: &str,
+        pid: u32,
+    ) -> Option<&mut VaultState> {
+        let index = if ephemeral {
+            self.ephemeral_index(name, pid)
+        } else {
+            self.stored_index(name)
+        }?;
+        Some(&mut self.vaults[index])
     }
 
     /// The vaults `pid` sees: every stored vault, and its shell's ephemeral ones.

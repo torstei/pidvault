@@ -544,6 +544,27 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 format!("locked {}", locked.join(", "))
             }
         }
+        Request::Delete {
+            vault: name,
+            ephemeral,
+        } => {
+            let mut state = fs::lock(&ctx.state);
+            let user = state
+                .user_mut(peer.uid)
+                .context("caller has no passwd entry")?;
+            let Some(vault) = user
+                .vault_in_mut(ephemeral, &name, peer.pid)
+                .filter(|v| v.seen_by(peer.pid))
+            else {
+                let kind = if ephemeral { fs::EPHEMERAL } else { fs::STORED };
+                bail!("you have no vault `{kind}/{name}`");
+            };
+            if vault.unlocked_ancestor(peer.pid).is_none() {
+                bail!("deleting `{name}` {}", needs_unlock(&name));
+            }
+            vault.delete()?;
+            format!("vault `{name}` deleted")
+        }
         Request::Status => String::new(),
     };
 
