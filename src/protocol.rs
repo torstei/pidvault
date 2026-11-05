@@ -63,6 +63,13 @@ pub enum Request {
         #[serde(default)]
         ephemeral: bool,
     },
+    /// Deletes `vault`, stored or with `ephemeral` the shell's ephemeral one, for good: for
+    /// a caller that has it unlocked.
+    Delete {
+        vault: String,
+        #[serde(default)]
+        ephemeral: bool,
+    },
     /// Part of the contract other programs rely on, with the fields of the reply that
     /// docs/security-design.md names: changing them breaks those programs.
     Status,

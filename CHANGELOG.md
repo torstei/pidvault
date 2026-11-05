@@ -21,6 +21,9 @@
   on it answers for that process. "Asking pidvault from another program" in
   docs/security-design.md has the request, the reply fields that stay stable, and the
   check the asker must make.
+- `pidvault delete NAME [--ephemeral] [--yes]` deletes a vault for good: its file, the
+  copy an import keeps, and every unlock of it. It needs the vault unlocked in the
+  calling shell, and asks you to type its name unless given `--yes`.
 
 ## 0.5.0 - 2026-10-30
 

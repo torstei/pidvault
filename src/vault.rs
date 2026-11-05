@@ -252,6 +252,22 @@ impl Stored {
     }
 }
 
+/// Removes the vault at `path` and the previous one kept beside it.
+pub fn remove(path: &Path) -> Result<()> {
+    for file in [path.to_path_buf(), sibling(path, ".previous")] {
+        match std::fs::remove_file(&file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("removing {}", file.display()));
+            }
+            _ => {}
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
