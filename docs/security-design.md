@@ -50,7 +50,7 @@ on the machine must hold anyway.
    │ FUSE   │ agent  │ control      │ (same three interfaces)           │ via ssh in an unlocked shell
    ▼        ▼        ▼              ▼                                   ▼
  /run/pidvault  /run/pidvault-agent.sock  /run/pidvault.sock
- (kernel: uid    (SO_PEERCRED, pidfd)      (SO_PEERCRED)
+ (kernel: uid    (SO_PEERCRED, pidfd)      (SO_PEERCRED, pidfd)
   and pid of
   each request)
    └──────────────── daemon, uid pidvault, sandboxed ─────────────────┘
@@ -190,7 +190,27 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
   `ephemeral_vaults_that_are_gone_take_no_place`; VM "four full vaults fit in what one user may
   hold", "bob still unlocks while carol holds them".
 
-### C8. A compromised daemon is contained
+### C8. A control-socket answer is about the process that opened the connection
+
+- The daemon takes the peer's credentials and a pidfd (`SO_PEERPIDFD`) when it handles a
+  connection on `/run/pidvault.sock`, and decides about the caller's shell from the
+  peer's pid, which the kernel recorded at `connect`. After each such decision
+  (`calling_shell`, `unlocked_ancestor`), and before changing anything or replying, it
+  checks the pidfd: once the process that connected has exited, its pid may be another
+  process's, so the request is refused (`daemon::check_opener`). A connection passed to
+  another process stays about the one that opened it, for as long as that one lives.
+- There is no fallback to `pidfd_open(pid)` on this socket. That would open a pidfd for
+  whatever holds the pid when the daemon gets to it, which is the race this claim rules
+  out: the opener exits before the daemon handles the connection, and its pid is reused
+  by a process inside an unlocked shell. Kernels before 6.5 lack `SO_PEERPIDFD`, so there
+  the daemon refuses every control request; the supported systems (Ubuntu 24.04 and
+  later, Linux 6.8) all have it.
+- Evidence: e2e
+  `status_on_a_handed_over_connection_describes_the_process_that_opened_it`,
+  `status_on_a_connection_opened_outside_an_unlocked_shell_reports_none`,
+  `status_is_refused_once_the_process_that_connected_has_exited`.
+
+### C9. A compromised daemon is contained
 
 - The daemon has no capabilities and no network, cannot see `/home`, and can write only
   its state directory; `systemd-analyze security` rates it 0.5. It holds every user's
@@ -198,6 +218,43 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
   vaults, or root.
 - Evidence: VM "the daemon holds no capabilities", "the daemon has no network of its
   own", "the daemon cannot see /home", "systemd rates the service's exposure below 2".
+
+## Asking pidvault from another program
+
+Another daemon can ask whether a process is in a shell that has a vault unlocked: that
+process connects to `/run/pidvault.sock` and passes the connected socket to the daemon
+(over `SCM_RIGHTS`), which sends the request and reads the reply. This is the only
+supported use of the control socket by other programs. Every other request and every
+other field of the reply is internal and may change in any release.
+
+**Request**, one line of JSON:
+
+```json
+{"op":"status"}
+```
+
+**Reply**, one line of JSON. These fields are stable:
+
+| Field | Meaning |
+|---|---|
+| `ok` | `true` for an answer, `false` for a refusal |
+| `vaults[].name` | The vault's name, without `stored/` or `ephemeral/` |
+| `vaults[].ephemeral` | `true` for an ephemeral vault, `false` for a stored one |
+| `vaults[].unlocked_by` | The pid of the unlocked shell the opener is, or descends from; `null` if none |
+
+- **The answer describes the process that opened the connection,** not the one writing
+  the request (C8). `vaults` lists the opener's user's stored vaults and the ephemeral
+  vaults of the opener's shell; a vault with a non-null `unlocked_by` is unlocked for
+  the opener.
+- **A refusal** has `ok: false`, an empty `vaults` and a `message` meant for people. The
+  daemon refuses, among other reasons, when the process that opened the connection has
+  exited, and on kernels before 6.5. Treat every reply with `ok: false` as "cannot
+  tell", never as "nothing unlocked".
+- **Check the peer before trusting the reply.** Any process can listen on a socket and
+  answer in this format. The asker must check with `SO_PEERCRED` on the socket it was
+  given that the peer's uid is the `pidvault` account's before believing a word.
+- The answer holds as of the moment the daemon replied. A shell can lock, or exit, right
+  after; ask again for each decision.
 
 ## Design principles
 
@@ -222,7 +279,7 @@ Each claim gives the argument for it and the evidence. "e2e" names a test in
 |---|---|
 | Memory safety (CWE-119 and family) | Rust. Every `unsafe` block states why it is sound, enforced by clippy's `undocumented_unsafe_blocks` |
 | Path traversal (CWE-22) | Vault names are restricted; tar paths must be normal components |
-| PID reuse, TOCTOU (CWE-367) | Shells and agent peers are held by pidfd; the calling shell is re-checked after its pidfd is opened |
+| PID reuse, TOCTOU (CWE-367) | Shells, agent peers and control-socket peers are held by pidfd; the calling shell is re-checked after its pidfd is opened |
 | Uncontrolled resource use (CWE-400) | The limits of C7 |
 | Timing side channels (CWE-208) | ECDSA with constant-time arithmetic; RSA signing blinded; K compared in constant time |
 | Weak crypto (CWE-327) | No own cryptography; no SHA-1 signatures; see below |

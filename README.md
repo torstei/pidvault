@@ -399,6 +399,9 @@ already unlocked see the new contents at once.
 - `unlock` registers the shell that ran it, and only if that shell is in the same session:
   a client orphaned with `(pidvault unlock &)` is adopted by `systemd --user`, which must
   not end up unlocking the whole login.
+- Another program can ask whether a process is in an unlocked shell; "Asking pidvault
+  from another program" in [docs/security-design.md](docs/security-design.md) has the
+  request, the reply and what to check.
 
 ## Development
 

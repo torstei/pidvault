@@ -9,6 +9,14 @@
   The stub now uses `match --kind stored`, so a shell holding only an ephemeral vault,
   such as a bao token, keeps your usual agent and config. Run `pidvault stub` again to
   get it; the old `status --quiet` line still works as before.
+- Another program can ask whether a process is in a shell with a vault unlocked: the
+  process connects to `/run/pidvault.sock` and passes the connection on, and `status`
+  on it answers for that process. "Asking pidvault from another program" in
+  docs/security-design.md has the request, the reply fields that stay stable, and the
+  check the asker must make.
+- The control socket refuses a request once the process that opened the connection has
+  exited, rather than answering for whatever process has its pid by then. It needs
+  Linux 6.5 or later and refuses every request on older kernels.
 
 ## 0.5.0 - 2026-10-30
 
