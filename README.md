@@ -73,6 +73,7 @@ The full list, with what each guarantee rests on, is in
 
 ## Installing
 
+pidvault needs Linux 6.5 or later; on an older kernel the daemon refuses every request.
 For Ubuntu 24.04 or later, on amd64, from the project's signed apt repository:
 
 ```sh
