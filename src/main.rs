@@ -255,7 +255,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 procs::check_tracing_restricted()?;
             }
             if ephemeral {
-                report(protocol::call(
+                let _ = report(protocol::call(
                     &cli.socket,
                     &Request::CreateEphemeral {
                         vault: vault.clone(),
@@ -303,7 +303,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             };
             let data = base64::engine::general_purpose::STANDARD.encode(sealed);
             let dir = cli.mount.join(fs::STORED).join(&vault);
-            report(protocol::call(
+            let _ = report(protocol::call(
                 &cli.socket,
                 &Request::Import {
                     vault: vault.clone(),
