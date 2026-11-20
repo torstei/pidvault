@@ -106,10 +106,10 @@ jobs:
         run: |
           mkdir debs
           gh release list --limit 1000 --json tagName --jq '.[].tagName' | while read -r tag; do
-            gh release download "$tag" --pattern '*.deb' --dir debs --clobber
+            gh release download "$tag" --pattern '*.deb' --pattern '*.deb.sigstore.json' --dir debs --clobber
           done
           # releases from before the rename; pidvault replaces them
-          rm -f debs/sshvault_*.deb
+          rm -f debs/sshvault_*
       - name: Install apt-ftparchive
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends apt-utils
       - name: Build and sign the repository

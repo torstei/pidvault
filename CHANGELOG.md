@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The apt repository publishes each package's build provenance bundle beside it, as
+  `pool/main/pidvault_X.Y.Z-1_amd64.deb.sigstore.json`, so a package fetched through apt can
+  be checked with `gh attestation verify --bundle` without asking GitHub.
+
 ## 0.6.0 - 2026-11-20
 
 - **pidvault now needs Linux 6.5 or later.** On an older kernel the daemon refuses every

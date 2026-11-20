@@ -89,7 +89,9 @@ The repository is signed with the key with fingerprint
 this repository as `packaging/pidvault-apt.asc`. Each `.deb` on the
 [releases page](https://github.com/torstei/pidvault/releases) also carries a build
 attestation: `gh attestation verify pidvault_*.deb --repo torstei/pidvault` shows that it
-was built by this repository's release workflow, and from which commit.
+was built by this repository's release workflow, and from which commit. The attestation's
+Sigstore bundle is also in the apt repository, beside each package, as
+`pool/main/pidvault_X.Y.Z-1_amd64.deb.sigstore.json`.
 
 Installing starts the service. Upgrading restarts it, which locks every shell.
 
@@ -453,8 +455,8 @@ twice, in different directories, refusing to go on unless both are identical. Th
 carries its dependency list (`cargo auditable`), and the package gets a build provenance
 and a CycloneDX SBOM attestation. The workflow then waits for approval in the `release`
 environment before it creates the GitHub release, signs the apt repository (built by
-`scripts/build-apt-repo.sh` from every released package) and publishes it on GitHub Pages.
-Only that approved job can reach the signing key.
+`scripts/build-apt-repo.sh` from every released package and its provenance bundle) and
+publishes it on GitHub Pages. Only that approved job can reach the signing key.
 
 Anyone can check a downloaded package with `gh attestation verify pidvault_X.Y.Z-1_amd64.deb
 --repo torstei/pidvault`, adding `--bundle` with the release's `.sigstore.json` to check it
