@@ -285,7 +285,7 @@ other field of the reply is internal and may change in any release.
 |---|---|
 | Memory safety (CWE-119 and family) | Rust. Every `unsafe` block states why it is sound, enforced by clippy's `undocumented_unsafe_blocks` |
 | Path traversal (CWE-22) | Vault names are restricted; tar paths must be normal components |
-| PID reuse, TOCTOU (CWE-367) | Shells, agent peers and control-socket peers are held by pidfd; the calling shell is re-checked after its pidfd is opened |
+| PID reuse, TOCTOU (CWE-367) | Shells, agent peers and control-socket peers are held by pidfd; the calling shell is re-checked after its pidfd is opened, and an answer worked out from a peer's pid counts only if the peer is still alive afterwards (`daemon::check_opener`, `fs::VaultState::shell_of`) |
 | Uncontrolled resource use (CWE-400) | The limits of C7 |
 | Timing side channels (CWE-208) | ECDSA with constant-time arithmetic; RSA signing blinded; K compared in constant time |
 | Weak crypto (CWE-327) | No own cryptography; no SHA-1 signatures; see below |

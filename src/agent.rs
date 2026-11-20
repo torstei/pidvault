@@ -177,7 +177,8 @@ impl Connection {
                 return Vec::new();
             };
             for vault in user.vaults() {
-                let (Some(open), Some(_)) = (&vault.open, vault.unlocked_ancestor(self.peer.pid))
+                let (Some(open), Some(_)) =
+                    (&vault.open, vault.shell_of(self.peer.pid, &self.process))
                 else {
                     continue;
                 };
