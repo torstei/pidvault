@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-11-20
 
 - **pidvault now needs Linux 6.5 or later.** On an older kernel the daemon refuses every
   request: `unlock`, `create`, `status`, `match` and `lock` fail, the `Match exec` line
@@ -24,6 +24,11 @@
 - `pidvault delete NAME [--ephemeral] [--yes]` deletes a vault for good: its file, the
   copy an import keeps, and every unlock of it. It needs the vault unlocked in the
   calling shell, and asks you to type its name unless given `--yes`.
+- The agent checks that the process that connected is still there after working out
+  which shell it descends from, not only before, so a process that has been given its
+  pid meanwhile cannot pass for it.
+- Pressing Ctrl-C at a passphrase prompt no longer leaves the terminal without echo:
+  rpassword, which reads the passphrase, is updated to 7.5.5.
 
 ## 0.5.0 - 2026-10-30
 
