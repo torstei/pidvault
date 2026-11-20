@@ -51,6 +51,12 @@ impl Pidfd {
 /// A pidfd for the process at the other end of `stream`, as it was when it connected; on
 /// kernels before 6.5, which cannot give one, opened from its pid instead.
 pub fn peer_pidfd(stream: &UnixStream, pid: u32) -> io::Result<Pidfd> {
+    connected_pidfd(stream).or_else(|_| Pidfd::open(pid))
+}
+
+/// A pidfd for the process that opened the connection at the other end of `stream`,
+/// whoever holds it now. Needs Linux 6.5 or later.
+pub fn connected_pidfd(stream: &UnixStream) -> io::Result<Pidfd> {
     let mut fd: libc::c_int = -1;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
     // SAFETY: fd and len outlive the call and len is fd's size
@@ -63,11 +69,14 @@ pub fn peer_pidfd(stream: &UnixStream, pid: u32) -> io::Result<Pidfd> {
             &mut len,
         )
     };
-    if rc == 0 && fd >= 0 {
-        // SAFETY: a descriptor the kernel just opened for this process, owned by nothing else
-        return Ok(Pidfd(unsafe { OwnedFd::from_raw_fd(fd) }));
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
     }
-    Pidfd::open(pid)
+    if fd < 0 {
+        return Err(io::Error::other("the kernel gave no pidfd for the peer"));
+    }
+    // SAFETY: a descriptor the kernel just opened for this process, owned by nothing else
+    Ok(Pidfd(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
 
 pub trait Liveness {

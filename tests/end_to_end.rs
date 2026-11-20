@@ -1,5 +1,7 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -1605,4 +1607,167 @@ fn match_counts_only_the_shells_unlocked_vaults_that_meet_every_condition() {
         f.path("nowhere.sock").display()
     ));
     assert_eq!(stdout(&gone), "2\n");
+}
+
+const OPENER_ENV: &str = "PIDVAULT_TEST_OPENER";
+
+fn send_fd(over: &UnixStream, fd: RawFd) {
+    let byte = [0u8];
+    let mut iov = libc::iovec {
+        iov_base: byte.as_ptr() as *mut libc::c_void,
+        iov_len: 1,
+    };
+    // SAFETY: CMSG_SPACE only computes a size
+    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+    let mut control = vec![0u8; space];
+    // SAFETY: an all-zero msghdr is valid; every pointer set below outlives sendmsg
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space as _;
+    // SAFETY: control holds exactly one header with room for one descriptor
+    let rc = unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
+        std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<RawFd>(), fd);
+        libc::sendmsg(over.as_raw_fd(), &msg, 0)
+    };
+    assert_eq!(rc, 1, "{}", std::io::Error::last_os_error());
+}
+
+fn recv_fd(over: &UnixStream) -> UnixStream {
+    let mut byte = [0u8];
+    let mut iov = libc::iovec {
+        iov_base: byte.as_mut_ptr().cast(),
+        iov_len: 1,
+    };
+    // SAFETY: CMSG_SPACE only computes a size
+    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+    let mut control = vec![0u8; space];
+    // SAFETY: an all-zero msghdr is valid; every pointer set below outlives recvmsg
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space as _;
+    // SAFETY: msg describes buffers that live until the end of this block
+    let fd = unsafe {
+        let rc = libc::recvmsg(over.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC);
+        assert_eq!(rc, 1, "{}", std::io::Error::last_os_error());
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        assert!(!cmsg.is_null() && (*cmsg).cmsg_type == libc::SCM_RIGHTS);
+        std::ptr::read_unaligned(libc::CMSG_DATA(cmsg).cast::<RawFd>())
+    };
+    // SAFETY: a descriptor the kernel just installed for this process, owned by nothing else
+    unsafe { UnixStream::from_raw_fd(fd) }
+}
+
+/// Run by `opened_by` in a child process: connects to the control socket and passes the
+/// connection on over descriptor 3, then exits or stays until that descriptor closes.
+#[test]
+fn connection_opener() {
+    let Ok(mode) = std::env::var(OPENER_ENV) else {
+        return;
+    };
+    // SAFETY: the parent put a socket at descriptor 3 for this process alone
+    let handoff = unsafe { UnixStream::from_raw_fd(3) };
+    let control = UnixStream::connect(std::env::var("PIDVAULT_SOCKET").unwrap()).unwrap();
+    send_fd(&handoff, control.as_raw_fd());
+    if mode == "stay" {
+        let _ = (&handoff).read(&mut [0u8]);
+    }
+}
+
+/// A control-socket connection that `connection_opener` opened as the last command of
+/// `script`, run in `sh`, and handed to this process. With `stay`, the opener waits
+/// until the returned guard is dropped; otherwise it has exited by the time this returns.
+fn opened_by(f: &Fixture, script: &str, stay: bool) -> (UnixStream, Child, UnixStream) {
+    use std::os::unix::process::CommandExt;
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    let theirs_fd = theirs.as_raw_fd();
+    let full = format!("{script}\nexec \"$OPENER\" connection_opener --exact --quiet >/dev/null");
+    let mut cmd = f.command("sh");
+    cmd.env("PW", PASSPHRASE)
+        .env("OPENER", std::env::current_exe().unwrap())
+        .env(OPENER_ENV, if stay { "stay" } else { "exit" })
+        .args(["-c", &full]);
+    // SAFETY: between fork and exec the closure calls only dup2, which is
+    // async-signal-safe, and allocates nothing
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(theirs_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().unwrap();
+    drop(theirs);
+    let connection = recv_fd(&ours);
+    if !stay {
+        assert!(child.wait().unwrap().success());
+    }
+    (connection, child, ours)
+}
+
+fn ask_status(connection: &UnixStream) -> serde_json::Value {
+    (&*connection).write_all(b"{\"op\":\"status\"}\n").unwrap();
+    let mut reply = String::new();
+    BufReader::new(connection).read_line(&mut reply).unwrap();
+    serde_json::from_str(&reply).unwrap()
+}
+
+const UNLOCK: &str =
+    r#"printf '%s\n' "$PW" | "$SV" unlock --passphrase-stdin >/dev/null || exit 99"#;
+
+#[test]
+fn status_on_a_handed_over_connection_describes_the_process_that_opened_it() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let (connection, mut opener, guard) = opened_by(&f, UNLOCK, true);
+    let reply = ask_status(&connection);
+    drop(guard);
+    assert!(opener.wait().unwrap().success());
+
+    assert_eq!(reply["ok"], true, "{reply}");
+    let vault = &reply["vaults"][0];
+    assert_eq!(vault["name"], "default", "{reply}");
+    assert_eq!(vault["ephemeral"], false, "{reply}");
+    assert!(vault["unlocked_by"].is_u64(), "{reply}");
+}
+
+#[test]
+fn status_on_a_connection_opened_outside_an_unlocked_shell_reports_none() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let (connection, mut opener, guard) = opened_by(&f, "", true);
+    let reply = ask_status(&connection);
+    drop(guard);
+    assert!(opener.wait().unwrap().success());
+
+    assert_eq!(reply["ok"], true, "{reply}");
+    let vault = &reply["vaults"][0];
+    assert_eq!(vault["name"], "default", "{reply}");
+    assert!(vault["unlocked_by"].is_null(), "{reply}");
+}
+
+#[test]
+fn status_is_refused_once_the_process_that_connected_has_exited() {
+    let Some(f) = Fixture::start(&[("config", CONFIG)]) else {
+        return;
+    };
+    let (connection, _, _) = opened_by(&f, UNLOCK, false);
+    let reply = ask_status(&connection);
+
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(reply["vaults"], serde_json::json!([]), "{reply}");
+    assert!(
+        reply["message"].as_str().unwrap().contains("has exited"),
+        "{reply}"
+    );
 }

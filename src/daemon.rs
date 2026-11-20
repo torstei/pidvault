@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 use crate::agent;
 use crate::fs::{self, Shared, State, Unlocked, VaultFs, VaultState};
 use crate::limits::{self, Connections, Guesses};
-use crate::procs::{self, Pidfd};
+use crate::procs::{self, Liveness, Pidfd};
 use crate::protocol::{self, Request, Response, VaultStatus};
 use crate::systemd;
 use crate::tree::Tree;
@@ -272,12 +272,7 @@ fn admit(connections: &Arc<Connections>, stream: &UnixStream) -> Option<limits::
 fn serve(stream: &UnixStream, ctx: &Daemon) {
     let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
     let _ = stream.set_write_timeout(Some(REQUEST_TIMEOUT));
-    let response = handle(stream, ctx).unwrap_or_else(|e| Response {
-        ok: false,
-        message: format!("{e:#}"),
-        vaults: Vec::new(),
-        data: None,
-    });
+    let response = handle(stream, ctx).unwrap_or_else(|e| Response::refused(format!("{e:#}")));
     let _ = protocol::write_response(stream, &response);
 }
 
@@ -330,6 +325,8 @@ fn needs_unlock(name: &str) -> String {
 // write of a vault file happens under it, which keeps saves from interleaving.
 fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
     let peer = procs::peer_cred(stream)?;
+    let opener = procs::connected_pidfd(stream)
+        .context("this kernel cannot say which process connected (SO_PEERPIDFD needs Linux 6.5)")?;
     let request = protocol::read_request(stream)?;
     // also finds the vaults on disk of a user this daemon has not seen yet
     fs::lock(&ctx.state)
@@ -346,7 +343,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
         } => {
             fs::check_vault_name(&name)?;
             let shell = if unlock {
-                Some(calling_shell(&peer)?)
+                Some(calling_shell(&peer, &opener)?)
             } else {
                 None
             };
@@ -369,6 +366,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 if replacing && vault.unlocked_ancestor(peer.pid).is_none() {
                     bail!("replacing `{name}` {}", needs_unlock(&name));
                 }
+                check_opener(&opener)?;
                 let held = vault.open.is_some() || shell.is_some();
                 if held {
                     fs::check_room(&name, &tree, room)?;
@@ -399,6 +397,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                     _ => bail!("export {}", needs_unlock(&name)),
                 }
             })?;
+            check_opener(&opener)?;
             let key = ctx.guesses.check(peer.uid, || {
                 limits::expensive(|| Key::unwrap(&wrapped_key, secret(&passphrase)))
             })?;
@@ -452,7 +451,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             for_secs,
         } => {
             let expires = for_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
-            let (shell, handle) = calling_shell(&peer)?;
+            let (shell, handle) = calling_shell(&peer, &opener)?;
             let key = Key::generate()?;
             let mut state = fs::lock(&ctx.state);
             let user = state
@@ -460,6 +459,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 .context("caller has no passwd entry")?;
             let room = user.room_for_new();
             let vault = user.new_ephemeral(&name, peer.pid)?;
+            check_opener(&opener)?;
             vault.hold(Unlocked::new(Tree::empty(), key, Vec::new()), room)?;
             vault.sessions.register(shell, handle, expires);
             let until = match for_secs {
@@ -475,7 +475,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
         } => {
             let expires = for_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
             fs::check_vault_name(&name)?;
-            let (shell, handle) = calling_shell(&peer)?;
+            let (shell, handle) = calling_shell(&peer, &opener)?;
             let path = with_vault(ctx, &peer, &name, |vault, _| Ok(vault.path.clone()))?;
             if !path.exists() {
                 bail!("you have no vault `{name}`; create one with `pidvault create {name}`");
@@ -485,6 +485,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 limits::expensive(|| Key::unwrap(&stored.wrapped_key, secret(&passphrase)))
             })?;
             with_vault(ctx, &peer, &name, |vault, room| {
+                check_opener(&opener)?;
                 // a vault already held keeps its unsaved changes; this unlock only proves the passphrase
                 match &vault.open {
                     Some(open) if open.key.same_as(&key) => {}
@@ -519,12 +520,24 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             let user = state
                 .user_mut(peer.uid)
                 .context("caller has no passwd entry")?;
+            let chosen = |vault: &VaultState| {
+                name.as_ref()
+                    .is_none_or(|n| *n == vault.name && vault.ephemeral == ephemeral)
+            };
+            let shells: Vec<Option<u32>> = user
+                .vaults()
+                .map(|vault| {
+                    if all || !chosen(vault) {
+                        None
+                    } else {
+                        vault.unlocked_ancestor(peer.pid)
+                    }
+                })
+                .collect();
+            check_opener(&opener)?;
             let mut locked = Vec::new();
-            for vault in user.vaults_mut() {
-                if name
-                    .as_ref()
-                    .is_some_and(|n| *n != vault.name || vault.ephemeral != ephemeral)
-                {
+            for (vault, shell) in user.vaults_mut().zip(shells) {
+                if !chosen(vault) {
                     continue;
                 }
                 if all {
@@ -532,7 +545,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                         locked.push(vault.name.clone());
                     }
                     vault.sessions.clear();
-                } else if let Some(shell) = vault.unlocked_ancestor(peer.pid) {
+                } else if let Some(shell) = shell {
                     vault.sessions.remove(shell);
                     locked.push(vault.name.clone());
                 }
@@ -577,6 +590,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 .collect()
         })
         .unwrap_or_default();
+    check_opener(&opener)?;
     Ok(Response {
         ok: true,
         message,
@@ -595,8 +609,17 @@ pub fn format_duration(secs: u64) -> String {
     }
 }
 
+/// Refuses once the process that opened the connection has exited: its pid, which every
+/// decision about the caller's shell is made from, may now be another process's.
+fn check_opener(opener: &Pidfd) -> Result<()> {
+    if opener.has_exited() {
+        bail!("the process that opened this connection has exited");
+    }
+    Ok(())
+}
+
 /// The shell that ran the client, which an unlock is for.
-fn calling_shell(peer: &procs::PeerCred) -> Result<(u32, Pidfd)> {
+fn calling_shell(peer: &procs::PeerCred, opener: &Pidfd) -> Result<(u32, Pidfd)> {
     let shell = procs::parent_of(peer.pid).context("cannot determine calling shell")?;
     let handle = Pidfd::open(shell).context("cannot track calling shell")?;
     // a pid read before the pidfd was opened might already belong to someone else
@@ -608,6 +631,7 @@ fn calling_shell(peer: &procs::PeerCred) -> Result<(u32, Pidfd)> {
     if shell <= 1 || procs::session_of(shell) != procs::session_of(peer.pid) {
         bail!("run pidvault directly from the shell it is meant to unlock");
     }
+    check_opener(opener)?;
     Ok((shell, handle))
 }
 

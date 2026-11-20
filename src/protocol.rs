@@ -63,6 +63,8 @@ pub enum Request {
         #[serde(default)]
         ephemeral: bool,
     },
+    /// Part of the contract other programs rely on, with the fields of the reply that
+    /// docs/security-design.md names: changing them breaks those programs.
     Status,
 }
 
@@ -100,6 +102,15 @@ pub struct Response {
 }
 
 impl Response {
+    pub fn refused(message: String) -> Response {
+        Response {
+            ok: false,
+            message,
+            vaults: Vec::new(),
+            data: None,
+        }
+    }
+
     /// The stored vault `name`.
     pub fn vault(&self, name: &str) -> Option<&VaultStatus> {
         self.vault_in(false, name)
@@ -164,4 +175,61 @@ pub fn write_response(mut stream: &UnixStream, response: &Response) -> Result<()
     line.push(b'\n');
     stream.write_all(&line)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn the_status_request_keeps_its_contract_shape() {
+        assert_eq!(
+            serde_json::to_value(Request::Status).unwrap(),
+            json!({"op": "status"})
+        );
+        assert!(matches!(
+            serde_json::from_str::<Request>(r#"{"op":"status"}"#).unwrap(),
+            Request::Status
+        ));
+    }
+
+    fn vault(name: &str, ephemeral: bool, unlocked_by: Option<u32>) -> VaultStatus {
+        VaultStatus {
+            name: name.to_string(),
+            unlocked_by,
+            expires_in: None,
+            sessions: 0,
+            ephemeral,
+            keys: 0,
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_status_reply_keeps_its_contract_fields() {
+        let reply = serde_json::to_value(Response {
+            ok: true,
+            message: String::new(),
+            vaults: vec![
+                vault("default", false, Some(1234)),
+                vault("bao", true, None),
+            ],
+            data: None,
+        })
+        .unwrap();
+        assert_eq!(reply["ok"], Value::Bool(true));
+        let contract = |v: &Value| json!([v["name"], v["ephemeral"], v["unlocked_by"]]);
+        let vaults = reply["vaults"].as_array().unwrap();
+        assert_eq!(contract(&vaults[0]), json!(["default", false, 1234]));
+        assert_eq!(contract(&vaults[1]), json!(["bao", true, null]));
+    }
+
+    #[test]
+    fn a_refusal_is_not_ok_and_lists_no_vaults() {
+        let reply = serde_json::to_value(Response::refused("no".to_string())).unwrap();
+        assert_eq!(reply["ok"], Value::Bool(false));
+        assert!(reply["message"].is_string());
+        assert_eq!(reply["vaults"], json!([]));
+    }
 }
