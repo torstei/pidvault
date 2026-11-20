@@ -175,12 +175,17 @@ impl VaultState {
     /// Ends the vault for good: every unlock of it, what is held in memory and, for a
     /// stored one, its file; a vault whose file cannot be removed stays as it was.
     pub fn delete(&mut self) -> Result<()> {
-        if !self.ephemeral {
-            crate::vault::remove(&self.path)?;
+        let removed = if self.ephemeral {
+            Ok(())
+        } else {
+            crate::vault::remove(&self.path)
+        };
+        // once the file is gone the vault is, even if what followed failed
+        if removed.is_ok() || !self.path.exists() {
+            self.sessions.clear();
+            self.open = None;
         }
-        self.sessions.clear();
-        self.open = None;
-        Ok(())
+        removed
     }
 
     fn mark_changed(&mut self) {
@@ -1272,6 +1277,30 @@ mod tests {
         child.wait().unwrap();
         assert_eq!(vault.shell_of(me, &gone), None);
         assert_eq!(vault.shell_of(me, &Pidfd::open(me).unwrap()), Some(me));
+    }
+
+    /// A delete that fails part way must not leave a vault unlocked in memory without its
+    /// file, where status no longer lists it and the next save brings it back.
+    #[test]
+    fn a_delete_that_cannot_remove_the_backup_leaves_the_vault_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut user = user_in(dir.path());
+        let me = std::process::id();
+        let vault = user.vault_or_new("v").unwrap();
+        std::fs::write(&vault.path, b"sealed").unwrap();
+        std::fs::create_dir(dir.path().join(format!("v{VAULT_SUFFIX}.previous"))).unwrap();
+        vault
+            .hold(
+                Unlocked::new(Tree::empty(), Key::generate().unwrap(), Vec::new()),
+                MAX_SECRET,
+            )
+            .unwrap();
+        vault.sessions.register(me, Pidfd::open(me).unwrap(), None);
+
+        assert!(vault.delete().is_err());
+        assert!(vault.path.exists());
+        assert!(vault.open.is_some());
+        assert_eq!(vault.unlocked_ancestor(me), Some(me));
     }
 
     /// Ephemeral vaults come and go under any name; one that is gone leaves its place to

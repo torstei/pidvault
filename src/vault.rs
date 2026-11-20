@@ -252,9 +252,10 @@ impl Stored {
     }
 }
 
-/// Removes the vault at `path` and the previous one kept beside it.
+/// Removes the vault at `path` and the previous one kept beside it, that one first, so a
+/// failure leaves the vault itself in place.
 pub fn remove(path: &Path) -> Result<()> {
-    for file in [path.to_path_buf(), sibling(path, ".previous")] {
+    for file in [sibling(path, ".previous"), path.to_path_buf()] {
         match std::fs::remove_file(&file) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Err(e).with_context(|| format!("removing {}", file.display()));
