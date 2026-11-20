@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **pidvault now needs Linux 6.5 or later.** On an older kernel the daemon refuses every
+  request: `unlock`, `create`, `status`, `match` and `lock` fail, the `Match exec` line
+  in `~/.ssh/config` stops matching, so ssh uses your usual config instead of a vault's,
+  and the prompt marker shows nothing. Ubuntu 24.04, the oldest supported release, has
+  6.8. The daemon needs the kernel to say which process opened each connection, so that
+  it refuses a request once that process has exited, rather than answering for
+  whatever process has its pid by then.
 - `status` and the prompt marker name stored vaults as `stored/NAME`, as they appear
   under the mount, beside `ephemeral/NAME`.
 - `pidvault match [--kind stored|ephemeral] [--name NAME] [--with-keys]` tells ssh's
@@ -14,9 +21,6 @@
   on it answers for that process. "Asking pidvault from another program" in
   docs/security-design.md has the request, the reply fields that stay stable, and the
   check the asker must make.
-- The control socket refuses a request once the process that opened the connection has
-  exited, rather than answering for whatever process has its pid by then. It needs
-  Linux 6.5 or later and refuses every request on older kernels.
 
 ## 0.5.0 - 2026-10-30
 
