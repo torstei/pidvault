@@ -1,6 +1,7 @@
 #!/bin/bash
 # Builds a signed apt repository from the .deb files in DEBS into OUT: suite and codename
-# "stable", component "main", amd64. Signs with KEY, which must be in gpg's keyring.
+# "stable", component "main", amd64. Signs with KEY, which must be in gpg's keyring. A
+# package's provenance bundle, DEB.sigstore.json in DEBS, is published beside it.
 # Usage: scripts/build-apt-repo.sh DEBS OUT KEY
 set -euo pipefail
 
@@ -11,6 +12,7 @@ key=$3
 rm -rf "$out"
 mkdir -p "$out/pool/main" "$out/dists/stable/main/binary-amd64"
 cp "$debs"/*.deb "$out/pool/main/"
+find "$debs" -maxdepth 1 -name '*.deb.sigstore.json' -exec cp -t "$out/pool/main/" {} +
 cd "$out"
 
 apt-ftparchive packages pool > dists/stable/main/binary-amd64/Packages
