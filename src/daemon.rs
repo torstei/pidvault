@@ -524,31 +524,30 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
                 name.as_ref()
                     .is_none_or(|n| *n == vault.name && vault.ephemeral == ephemeral)
             };
-            let shells: Vec<Option<u32>> = user
-                .vaults()
-                .map(|vault| {
-                    if all || !chosen(vault) {
-                        None
-                    } else {
-                        vault.unlocked_ancestor(peer.pid)
-                    }
-                })
-                .collect();
+            let shells: Vec<(u8, u32)> = if all {
+                Vec::new()
+            } else {
+                user.vaults()
+                    .filter(|vault| chosen(vault))
+                    .filter_map(|vault| Some((vault.index(), vault.unlocked_ancestor(peer.pid)?)))
+                    .collect()
+            };
             check_opener(&opener)?;
             let mut locked = Vec::new();
-            for (vault, shell) in user.vaults_mut().zip(shells) {
-                if !chosen(vault) {
-                    continue;
-                }
-                if all {
+            if all {
+                for vault in user.vaults_mut().filter(|vault| chosen(vault)) {
                     if !vault.sessions.is_empty() {
                         locked.push(vault.name.clone());
                     }
                     vault.sessions.clear();
-                } else if let Some(shell) = shell {
-                    vault.sessions.remove(shell);
-                    locked.push(vault.name.clone());
                 }
+            }
+            for (index, shell) in shells {
+                let vault = user
+                    .by_index_mut(index)
+                    .context("a vault disappeared while locking")?;
+                vault.sessions.remove(shell);
+                locked.push(vault.name.clone());
             }
             state.prune();
             if locked.is_empty() {

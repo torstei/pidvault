@@ -118,6 +118,11 @@ pub struct VaultState {
 }
 
 impl VaultState {
+    /// The vault's place among its user's, which stays its own while the state is locked.
+    pub fn index(&self) -> u8 {
+        self.index
+    }
+
     pub fn unlocked_ancestor(&self, pid: u32) -> Option<u32> {
         self.sessions.unlocked_ancestor(pid, procs::parent_of)
     }
@@ -381,7 +386,7 @@ impl UserState {
         self.vaults.get(usize::from(index).checked_sub(1)?)
     }
 
-    fn by_index_mut(&mut self, index: u8) -> Option<&mut VaultState> {
+    pub fn by_index_mut(&mut self, index: u8) -> Option<&mut VaultState> {
         self.vaults.get_mut(usize::from(index).checked_sub(1)?)
     }
 
