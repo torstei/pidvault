@@ -372,7 +372,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 if !std::io::stdin().is_terminal() {
                     bail!("not deleting `{shown}` without a terminal to confirm on; add --yes");
                 }
-                let reply = protocol::call(&cli.socket, &Request::Status)?;
+                let reply = answered(protocol::call(&cli.socket, &Request::Status)?)?;
                 match reply.vault_in(ephemeral, &vault) {
                     None => bail!("you have no vault `{shown}`"),
                     Some(v) if v.unlocked_by.is_none() => bail!(
