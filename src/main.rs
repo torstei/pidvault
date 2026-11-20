@@ -369,7 +369,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             quiet,
             prompt,
         } => {
-            let reply = match protocol::call(&cli.socket, &Request::Status) {
+            let reply = match protocol::call(&cli.socket, &Request::Status).and_then(answered) {
                 Ok(reply) => reply,
                 Err(_) if quiet || prompt => return Ok(ExitCode::from(2)),
                 Err(e) => return Err(e),
@@ -538,7 +538,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             name,
             with_keys,
         } => {
-            let Ok(reply) = protocol::call(&cli.socket, &Request::Status) else {
+            let Ok(reply) = protocol::call(&cli.socket, &Request::Status).and_then(answered) else {
                 return Ok(ExitCode::from(2));
             };
             let found = reply.vaults.iter().any(|v| {
@@ -791,10 +791,16 @@ fn read_limited(file: &Path) -> Result<Vec<u8>> {
 /// Comfortably above an age file holding the largest vault the daemon accepts.
 const MAX_EXPORT: u64 = 2 * secret::MAX_SECRET as u64;
 
-fn report(reply: Response) -> Result<ExitCode> {
+/// The reply, if the daemon answered rather than refused.
+fn answered(reply: Response) -> Result<Response> {
     if !reply.ok {
         bail!("{}", reply.message);
     }
+    Ok(reply)
+}
+
+fn report(reply: Response) -> Result<ExitCode> {
+    let reply = answered(reply)?;
     if !reply.message.is_empty() {
         println!("{}", reply.message);
     }
