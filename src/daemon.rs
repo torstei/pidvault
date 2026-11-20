@@ -574,6 +574,7 @@ fn handle(stream: &UnixStream, ctx: &Daemon) -> Result<Response> {
             if vault.unlocked_ancestor(peer.pid).is_none() {
                 bail!("deleting `{name}` {}", needs_unlock(&name));
             }
+            check_opener(&opener)?;
             vault.delete()?;
             format!("vault `{name}` deleted")
         }
