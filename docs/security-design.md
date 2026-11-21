@@ -257,8 +257,14 @@ other field of the reply is internal and may change in any release.
   exited, and on kernels before 6.5. Treat every reply with `ok: false` as "cannot
   tell", never as "nothing unlocked".
 - **Check the peer before trusting the reply.** Any process can listen on a socket and
-  answer in this format. The asker must check with `SO_PEERCRED` on the socket it was
-  given that the peer's uid is the `pidvault` account's before believing a word.
+  answer in this format. A connection's `SO_PEERCRED` are those of whoever created the
+  listening socket, and pidvault's is systemd's: the peer is pid 1, uid 0, never the
+  `pidvault` account. Before believing a word, the asker must check that the peer's uid is 0
+  and that the listener's bound address, `getpeername` on the socket it was given, is
+  `/run/pidvault.sock`, a name only root can give it. Both are needed: uid 0 alone also
+  matches every other socket systemd or another root service listens on. Judge that
+  address, not the path the socket was said to be connected to: a fake listener runs as its
+  maker's uid, whatever name it binds.
 - The answer holds as of the moment the daemon replied. A shell can lock, or exit, right
   after; ask again for each decision.
 
