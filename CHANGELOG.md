@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The security design's advice for programs asking `status` over a passed connection now
+  says to check for a root peer bound at `/run/pidvault.sock`: under socket activation the
+  peer is systemd, so the `pidvault` account it named never matched.
 - The apt repository publishes each package's build provenance bundle beside it, as
   `pool/main/pidvault_X.Y.Z-1_amd64.deb.sigstore.json`, so a package fetched through apt can
   be checked with `gh attestation verify --bundle` without asking GitHub.

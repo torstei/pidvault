@@ -35,6 +35,12 @@ check "view is mounted" equals "$(findmnt -n -o SOURCE,FSTYPE /run/pidvault)" "p
 check "mount root belongs to the daemon" equals "$(stat -c '%U %a' /run/pidvault)" "pidvault 755"
 check "socket is connectable by all, in root's /run" equals "$(stat -c '%A %U' /run/pidvault.sock)" "srw-rw-rw- root"
 check "agent socket is connectable by all, in root's /run" equals "$(stat -c '%A %U' /run/pidvault-agent.sock)" "srw-rw-rw- root"
+check "the control socket's peer is root, bound at /run/pidvault.sock" equals "$(runuser -u nobody -- python3 -I -c '
+import socket, struct
+s = socket.socket(socket.AF_UNIX)
+s.connect("/run/pidvault.sock")
+pid, uid, gid = struct.unpack("3i", s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+print(uid, s.getpeername())')" "0 /run/pidvault.sock"
 check "vault store belongs to the daemon" equals "$(stat -c '%U %a' /var/lib/pidvault)" "pidvault 700"
 
 # --- users with real user managers -------------------------------------------
